@@ -1,0 +1,11 @@
+state.json
+.state-*.json
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+*.har
+debug-*.html

@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+"""Монитор свободных дат электронной очереди (паспортный сервис, Варшава).
+
+Проверяет https://warszawa.pasport.org.ua/solutions/e-queue и шлёт уведомление
+в Telegram, когда появляются свободные даты.
+
+Запуск:
+    python monitor.py                  # основной цикл
+    python monitor.py --once           # одна проверка, вывести результат и выйти
+    python monitor.py --test-telegram  # проверить, что уведомления доходят
+    python monitor.py --chat-id        # подсказать свой TELEGRAM_CHAT_ID
+    python monitor.py --simulate tests/fixtures/open.html   # прогон парсера на файле
+    python monitor.py --simulate-open  # полный цикл на подменённом ответе «даты есть»
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import random
+import signal
+import sys
+import time
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+import parser as queue_parser
+import state as state_module
+from config import Config
+from fetcher import BlockedError, BrowserFetcher, CaptchaError, FetchError, build_fetcher
+from notifier import Notifier
+
+log = logging.getLogger("monitor")
+
+_stop = False
+
+
+def _handle_signal(signum, _frame):
+    global _stop
+    log.info("Получен сигнал %s — завершаемся после текущей проверки", signum)
+    _stop = True
+
+
+def setup_logging(level: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, level, logging.INFO),
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
+    )
+
+
+def html_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+class Monitor:
+    def __init__(self, cfg: Config, notifier: Notifier) -> None:
+        self.cfg = cfg
+        self.notifier = notifier
+        self.state = state_module.load(cfg.state_path)
+        self.fetcher = build_fetcher(cfg)
+        self.tz = ZoneInfo(cfg.heartbeat_timezone)
+        self.consecutive_errors = 0
+        self.last_errors: list[Exception] = []
+        self.switched_to_browser = False
+
+    # ---------------------------------------------------------------- helpers
+
+    def now(self) -> datetime:
+        return datetime.now(timezone.utc).astimezone(self.tz)
+
+    def save(self) -> None:
+        state_module.save(self.cfg.state_path, self.state)
+
+    def sleep_interval(self) -> None:
+        """Пауза между проверками с джиттером, чтобы не выглядеть роботом."""
+        if isinstance(self.fetcher, BrowserFetcher):
+            base, jitter = self.cfg.browser_interval_seconds, self.cfg.browser_jitter_seconds
+        else:
+            base, jitter = self.cfg.interval_seconds, self.cfg.jitter_seconds
+
+        delay = base + random.uniform(0, jitter)
+        log.debug("Спим %.1f сек", delay)
+        self._interruptible_sleep(delay)
+
+    @staticmethod
+    def _interruptible_sleep(seconds: float) -> None:
+        """Спит, но просыпается на SIGTERM — чтобы Render не убивал воркер силой."""
+        deadline = time.monotonic() + seconds
+        while not _stop:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(1.0, remaining))
+
+    # ------------------------------------------------------------ уведомления
+
+    def notify_slots(self, status: queue_parser.QueueStatus, new_dates: list[str]) -> None:
+        if new_dates:
+            dates = ", ".join(new_dates)
+            text = (
+                f"🟢 <b>Появились даты: {html_escape(dates)}</b>\n"
+                f"Беги записываться: {self.cfg.url}"
+            )
+        else:
+            text = (
+                "🟢 <b>Появились свободные места!</b>\n"
+                "Конкретные даты со страницы считать не удалось — "
+                f"проверь сам: {self.cfg.url}"
+            )
+        self.notifier.send(text)
+
+    def notify_closed(self) -> None:
+        self.notifier.send("🔴 Свободные места закончились.", silent=True)
+
+    def notify_outage(self, error: Exception) -> None:
+        if isinstance(error, CaptchaError):
+            text = (
+                "⚠️ <b>Нужно вмешательство</b>\n"
+                "Cloudflare показывает капчу/челлендж — автоматически это не решается.\n"
+                f"Ошибка: {html_escape(str(error))}"
+            )
+        elif isinstance(error, BlockedError):
+            text = (
+                "⚠️ <b>Похоже, забанили</b>\n"
+                "Сайт отдаёт блокировку. Скорее всего, дело в IP хостинга "
+                "(см. README, раздел «Если Cloudflare блокирует»).\n"
+                f"Ошибка: {html_escape(str(error))}"
+            )
+        else:
+            text = (
+                "⚠️ <b>Похоже, сайт лёг</b>\n"
+                f"{self.cfg.error_threshold} ошибок подряд. "
+                f"Последняя: {html_escape(str(error))}"
+            )
+        text += f"\n\nПауза {self.cfg.error_pause_minutes} мин, потом попробую снова."
+        self.notifier.send(text)
+
+    def notify_recovered(self) -> None:
+        self.notifier.send("✅ Связь с сайтом восстановилась, продолжаю следить.", silent=True)
+
+    def maybe_heartbeat(self) -> None:
+        """Раз в сутки в HEARTBEAT_HOUR сообщить, что монитор жив."""
+        now = self.now()
+        today = now.date().isoformat()
+
+        if now.hour < self.cfg.heartbeat_hour or self.state.last_heartbeat_day == today:
+            return
+
+        backend = "браузер" if isinstance(self.fetcher, BrowserFetcher) else "прямой запрос"
+        self.notifier.send(
+            f"✅ Монитор жив. За сутки проверок: {self.state.checks}, "
+            f"ошибок: {self.state.errors}.\n"
+            f"Режим: {backend}. Текущее состояние очереди: {self.state.queue_state}.",
+            silent=True,
+        )
+        self.state.last_heartbeat_day = today
+        self.state.reset_counters(today)
+        self.save()
+
+    # ------------------------------------------------------------- одна итерация
+
+    def handle_status(self, status: queue_parser.QueueStatus) -> None:
+        """Сравнить свежее состояние с прошлым и уведомить, если нужно."""
+        previous = self.state.queue_state
+
+        if status.state == queue_parser.UNKNOWN:
+            self.state.unknown_streak += 1
+            log.warning(
+                "Состояние не распознано (%s), подряд: %d",
+                status.note,
+                self.state.unknown_streak,
+            )
+            # Разметку могли поменять — предупредим один раз, примерно через час.
+            if self.state.unknown_streak >= 60 and not self.state.unknown_notified:
+                self.notifier.send(
+                    "⚠️ Страница открывается, но состояние очереди распознать не получается — "
+                    "возможно, изменилась вёрстка сайта. Стоит проверить парсер.\n"
+                    f"{self.cfg.url}"
+                )
+                self.state.unknown_notified = True
+            self.save()
+            return
+
+        self.state.unknown_streak = 0
+        self.state.unknown_notified = False
+
+        if status.state == queue_parser.OPEN:
+            new_dates = [d for d in status.dates if d not in self.state.notified_dates]
+
+            # Уведомляем, если появились новые даты либо очередь только что открылась.
+            if new_dates or previous != queue_parser.OPEN:
+                log.info("ЕСТЬ МЕСТА: %s (новые: %s)", status.dates, new_dates)
+                self.notify_slots(status, new_dates)
+                self.state.notified_dates = list(
+                    dict.fromkeys(self.state.notified_dates + status.dates)
+                )
+            else:
+                log.info("Места есть, но даты те же (%s) — не спамим", status.dates)
+        else:
+            if previous == queue_parser.OPEN:
+                log.info("Места закончились")
+                if self.cfg.notify_on_close:
+                    self.notify_closed()
+            # Забываем прошлые даты, чтобы их повторное появление снова стало новостью.
+            self.state.notified_dates = []
+            log.info("Мест нет (%s)", status.note)
+
+        self.state.queue_state = status.state
+        self.save()
+
+    def maybe_switch_to_browser(self) -> None:
+        """В режиме auto: после серии блокировок попробовать Playwright."""
+        if self.cfg.fetch_mode != "auto" or self.switched_to_browser:
+            return
+        if isinstance(self.fetcher, BrowserFetcher):
+            return
+        if not all(isinstance(e, BlockedError) for e in self.last_errors):
+            return
+
+        try:
+            import playwright  # noqa: F401
+        except ImportError:
+            log.warning(
+                "Прямые запросы блокируются, но Playwright не установлен — "
+                "переключиться на браузер не могу"
+            )
+            self.switched_to_browser = True  # больше не пробуем
+            return
+
+        log.warning("Прямые запросы блокируются — переключаюсь на Playwright")
+        self.fetcher.close()
+        self.fetcher = BrowserFetcher(self.cfg)
+        self.switched_to_browser = True
+        self.notifier.send(
+            "ℹ️ Прямые запросы блокируются, переключился на headless-браузер.",
+            silent=True,
+        )
+
+    def check_once(self, html: str | None = None) -> queue_parser.QueueStatus | None:
+        """Одна проверка. Возвращает состояние либо None, если была ошибка."""
+        today = self.now().date().isoformat()
+        if self.state.counters_day != today:
+            self.state.reset_counters(today)
+
+        try:
+            page = html if html is not None else self.fetcher.fetch()
+        except FetchError as exc:
+            self.consecutive_errors += 1
+            self.state.errors += 1
+            self.last_errors.append(exc)
+            self.last_errors = self.last_errors[-self.cfg.error_threshold :]
+            log.error("Ошибка проверки (%d подряд): %s", self.consecutive_errors, exc)
+            self.save()
+            return None
+
+        self.state.checks += 1
+
+        if self.consecutive_errors:
+            log.info("Связь восстановилась после %d ошибок", self.consecutive_errors)
+            if self.state.outage_notified:
+                self.notify_recovered()
+                self.state.outage_notified = False
+        self.consecutive_errors = 0
+        self.last_errors.clear()
+
+        status = queue_parser.parse(page)
+        log.info("Состояние очереди: %s", status)
+        return status
+
+    # ------------------------------------------------------------------ цикл
+
+    def run(self) -> None:
+        backend = "браузер" if isinstance(self.fetcher, BrowserFetcher) else "прямой запрос"
+        log.info(
+            "Старт. URL=%s, режим=%s (%s), интервал=%d±%d сек",
+            self.cfg.url,
+            self.cfg.fetch_mode,
+            backend,
+            self.cfg.interval_seconds,
+            self.cfg.jitter_seconds,
+        )
+
+        while not _stop:
+            status = self.check_once()
+
+            if status is not None:
+                self.handle_status(status)
+            elif self.consecutive_errors >= self.cfg.error_threshold:
+                if not self.state.outage_notified:
+                    self.notify_outage(self.last_errors[-1])
+                    self.state.outage_notified = True
+                    self.save()
+                self.maybe_switch_to_browser()
+                log.warning("Пауза %d минут", self.cfg.error_pause_minutes)
+                self._interruptible_sleep(self.cfg.error_pause_minutes * 60)
+                self.consecutive_errors = 0
+                continue
+
+            self.maybe_heartbeat()
+            self.sleep_interval()
+
+        log.info("Остановлено")
+        self.fetcher.close()
+
+
+# ----------------------------------------------------------------------- CLI
+
+
+def cmd_chat_id(cfg: Config) -> int:
+    if not cfg.telegram_token:
+        print("Задай TELEGRAM_BOT_TOKEN.")
+        return 1
+
+    notifier = Notifier(cfg.telegram_token, "")
+    data = notifier.get_updates()
+    results = data.get("result", [])
+
+    if not results:
+        print(
+            "Апдейтов нет. Открой чат с ботом в Telegram, отправь ему /start "
+            "и запусти команду ещё раз."
+        )
+        return 1
+
+    seen = {}
+    for update in results:
+        message = update.get("message") or update.get("channel_post") or {}
+        chat = message.get("chat") or {}
+        if chat.get("id") is not None:
+            seen[chat["id"]] = chat.get("username") or chat.get("title") or chat.get("first_name")
+
+    for chat_id, title in seen.items():
+        print(f"TELEGRAM_CHAT_ID={chat_id}   ({title})")
+    return 0
+
+
+def cmd_simulate(cfg: Config, path: str) -> int:
+    with open(path, encoding="utf-8") as fh:
+        html = fh.read()
+    status = queue_parser.parse(html)
+    print(f"Файл:      {path}")
+    print(f"Состояние: {status.state}")
+    print(f"Даты:      {status.dates or '—'}")
+    print(f"Заметка:   {status.note}")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Монитор очереди паспортного сервиса")
+    ap.add_argument("--once", action="store_true", help="одна проверка и выход")
+    ap.add_argument("--test-telegram", action="store_true", help="отправить тестовое сообщение")
+    ap.add_argument("--chat-id", action="store_true", help="показать свой chat_id")
+    ap.add_argument("--simulate", metavar="FILE", help="разобрать HTML из файла")
+    ap.add_argument(
+        "--simulate-open",
+        action="store_true",
+        help="полный цикл на подменённом ответе «даты есть» (проверка уведомления)",
+    )
+    args = ap.parse_args()
+
+    cfg = Config.from_env()
+    setup_logging(cfg.log_level)
+
+    if args.simulate:
+        return cmd_simulate(cfg, args.simulate)
+
+    if args.chat_id:
+        return cmd_chat_id(cfg)
+
+    cfg.require_telegram()
+    notifier = Notifier(cfg.telegram_token, cfg.telegram_chat_id)
+
+    if args.test_telegram:
+        ok = notifier.send(
+            "🔔 Тестовое сообщение от монитора очереди.\n"
+            "Если ты это видишь — уведомления настроены правильно."
+        )
+        return 0 if ok else 1
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    monitor = Monitor(cfg, notifier)
+
+    if args.simulate_open:
+        # Критерий готовности №3: подменяем ответ сайта и проверяем уведомление.
+        import os.path
+
+        fixture = os.path.join(os.path.dirname(__file__), "tests", "fixtures", "open.html")
+        with open(fixture, encoding="utf-8") as fh:
+            html = fh.read()
+        status = monitor.check_once(html=html)
+        log.info("Симуляция: распознано %s", status)
+        if status is not None:
+            monitor.handle_status(status)
+        return 0
+
+    if args.once:
+        status = monitor.check_once()
+        if status is None:
+            log.error("Проверка не удалась")
+            monitor.fetcher.close()
+            return 1
+        monitor.handle_status(status)
+        monitor.fetcher.close()
+        return 0
+
+    monitor.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

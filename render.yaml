@@ -1,0 +1,55 @@
+# Деплой на Render. Тип сервиса — Background Worker: входящий HTTP не нужен.
+#
+# По умолчанию собирается лёгкий Python-воркер (Вариант А, прямые запросы).
+# Чтобы перейти на Вариант Б (headless-браузер), см. README,
+# раздел «Переключение на браузер на Render».
+
+services:
+  - type: worker
+    name: passport-queue-monitor
+    runtime: python
+    plan: starter
+    region: frankfurt          # ближайший к Варшаве регион Render
+    buildCommand: pip install -r requirements.txt
+    startCommand: python monitor.py
+
+    envVars:
+      # --- секреты: значения задаются в дашборде Render, не в этом файле ---
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+
+      # Прокси для обхода блокировки по IP. Пустой = ходим напрямую.
+      # Формат: http://user:pass@host:port
+      - key: SCRAPE_PROXY
+        sync: false
+
+      # --- обычные настройки ---
+      - key: FETCH_MODE
+        value: direct          # direct | browser | auto
+      - key: INTERVAL_SECONDS
+        value: "45"
+      - key: JITTER_SECONDS
+        value: "15"
+      - key: ERROR_THRESHOLD
+        value: "5"
+      - key: ERROR_PAUSE_MINUTES
+        value: "15"
+      - key: HEARTBEAT_HOUR
+        value: "10"
+      - key: HEARTBEAT_TIMEZONE
+        value: Europe/Warsaw
+      - key: STATE_PATH
+        value: /var/data/state.json
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+    # Диск, чтобы state.json переживал передеплой. Без него после рестарта
+    # придёт максимум одно повторное уведомление — не критично, можно убрать.
+    disk:
+      name: monitor-state
+      mountPath: /var/data
+      sizeGB: 1
