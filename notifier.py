@@ -12,6 +12,43 @@ log = logging.getLogger(__name__)
 API_BASE = "https://api.telegram.org"
 TIMEOUT = 20
 
+# Типовые ошибки Bot API и что с ними делать. Без подсказки они выглядят
+# загадочно: самая частая — бот физически не может написать первым тому,
+# кто не нажал у него /start.
+ERROR_HINTS = (
+    (
+        "chat not found",
+        "Telegram не знает такой чат. Две причины: либо TELEGRAM_CHAT_ID неверный, "
+        "либо ты ещё не открывал чат с ботом. Бот НЕ МОЖЕТ написать первым — "
+        "зайди в Telegram, найди своего бота и нажми /start, потом перезапусти сервис.",
+    ),
+    (
+        "bot can't initiate conversation",
+        "Бот не может написать первым. Открой чат с ботом в Telegram и нажми /start.",
+    ),
+    (
+        "bot was blocked by the user",
+        "Ты заблокировал бота в Telegram. Разблокируй его и нажми /start.",
+    ),
+    (
+        "unauthorized",
+        "TELEGRAM_BOT_TOKEN неверный или отозван. Возьми свежий токен у BotFather.",
+    ),
+    (
+        "chat_id is empty",
+        "TELEGRAM_CHAT_ID пустой. Узнать свой id: python monitor.py --chat-id",
+    ),
+)
+
+
+def explain(description: str) -> str:
+    """Превратить ответ Telegram в понятную подсказку."""
+    lowered = description.lower()
+    for marker, hint in ERROR_HINTS:
+        if marker in lowered:
+            return hint
+    return ""
+
 
 class Notifier:
     """Тонкая обёртка над Bot API.
@@ -24,6 +61,8 @@ class Notifier:
         self.token = token
         self.chat_id = chat_id
         self.disabled = disabled
+        # Последняя подсказка по ошибке — её показывает самопроверка при старте.
+        self.last_error = ""
 
     def send(self, text: str, silent: bool = False) -> bool:
         """Отправить сообщение. Возвращает True при успехе."""
@@ -52,18 +91,38 @@ class Notifier:
                 body = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:300]
-            log.error("Telegram HTTP %s: %s", exc.code, detail)
+            try:
+                description = json.loads(detail).get("description", detail)
+            except ValueError:
+                description = detail
+            self._report_failure(f"HTTP {exc.code}: {description}", description)
             return False
         except Exception as exc:
-            log.error("Telegram недоступен: %s", exc)
+            self.last_error = f"Telegram недоступен: {exc}"
+            log.error("%s", self.last_error)
             return False
 
         if not body.get("ok"):
-            log.error("Telegram вернул ошибку: %s", body)
+            description = str(body.get("description", body))
+            self._report_failure(f"Telegram вернул ошибку: {description}", description)
             return False
 
+        self.last_error = ""
         log.info("Telegram: сообщение отправлено")
         return True
+
+    def _report_failure(self, summary: str, description: str) -> None:
+        hint = explain(description)
+        self.last_error = f"{summary}. {hint}".strip()
+        log.error("%s", summary)
+        if hint:
+            log.error("ЧТО ДЕЛАТЬ: %s", hint)
+
+    def check(self) -> bool:
+        """Стартовая самопроверка: убедиться, что сообщения реально доходят."""
+        return self.send(
+            "🚀 Монитор очереди запущен и следит за появлением дат.", silent=True
+        )
 
     def get_updates(self) -> dict:
         """Вспомогательное: посмотреть входящие, чтобы узнать свой chat_id."""

@@ -30,10 +30,14 @@ class FakeNotifier:
 
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.last_error = ""
 
     def send(self, text: str, silent: bool = False) -> bool:
         self.messages.append(text)
         return True
+
+    def check(self) -> bool:
+        return self.send("🚀 Монитор очереди запущен", silent=True)
 
 
 class FakeFetcher:
@@ -172,6 +176,25 @@ def test_state_survives_restart():
     restarted.state = monitor_module.state_module.load(mon.cfg.state_path)
     _step(restarted)
     assert notifier2.messages == []
+
+
+def test_telegram_errors_get_actionable_hints():
+    """Самая частая ошибка — бот не может написать первым. Подсказка обязана быть."""
+    import notifier as notifier_module
+
+    assert "/start" in notifier_module.explain("Bad Request: chat not found")
+    assert "/start" in notifier_module.explain(
+        "Forbidden: bot can't initiate conversation with a user"
+    )
+    assert "/start" in notifier_module.explain("Forbidden: bot was blocked by the user")
+    assert "BotFather" in notifier_module.explain("Unauthorized")
+    assert notifier_module.explain("что-то совсем неизвестное") == ""
+
+
+def test_startup_check_sends_a_message():
+    mon, notifier = _monitor([])
+    assert mon.notifier.check() is True
+    assert "запущен" in notifier.messages[0]
 
 
 def test_interval_floor_is_enforced():
