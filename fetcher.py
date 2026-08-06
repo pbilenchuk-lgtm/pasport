@@ -98,8 +98,11 @@ class DirectFetcher:
 
     name = "direct"
 
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, proxy_provider=None) -> None:
         self.cfg = cfg
+        # Функция, возвращающая адрес прокси на момент запроса: пул может
+        # переключиться между проверками.
+        self.proxy_provider = proxy_provider or (lambda: cfg.scrape_proxy or None)
         self._impl = None
         self._client = None
         self._setup()
@@ -115,7 +118,7 @@ class DirectFetcher:
 
     def fetch(self) -> str:
         headers = browser_headers(self.cfg)
-        proxy = self.cfg.scrape_proxy or None
+        proxy = self.proxy_provider()
 
         if self._impl == "curl_cffi":
             from curl_cffi import requests as curl_requests
@@ -158,14 +161,22 @@ class BrowserFetcher:
 
     name = "browser"
 
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, proxy_provider=None) -> None:
         self.cfg = cfg
+        self.proxy_provider = proxy_provider or (lambda: cfg.scrape_proxy or None)
         self._pw = None
         self._browser = None
         self._context = None
         self._page = None
+        self._launched_proxy = None
 
     def _ensure_page(self):
+        # Прокси задаётся при запуске браузера, поэтому смена прокси требует
+        # перезапуска контекста.
+        if self._page is not None and self.proxy_provider() != self._launched_proxy:
+            log.info("Прокси сменился — перезапускаю браузер")
+            self.close()
+
         if self._page is not None:
             return self._page
 
@@ -179,8 +190,9 @@ class BrowserFetcher:
             "--disable-blink-features=AutomationControlled",
         ]
         launch_kwargs: dict = {"headless": True, "args": launch_args}
-        if self.cfg.scrape_proxy:
-            launch_kwargs["proxy"] = {"server": self.cfg.scrape_proxy}
+        self._launched_proxy = self.proxy_provider()
+        if self._launched_proxy:
+            launch_kwargs["proxy"] = {"server": self._launched_proxy}
 
         self._browser = self._pw.chromium.launch(**launch_kwargs)
         self._context = self._browser.new_context(
@@ -243,8 +255,83 @@ class BrowserFetcher:
         self._pw = self._browser = self._context = self._page = None
 
 
-def build_fetcher(cfg: Config):
+def probe(cfg: Config, proxy: str | None = None, timeout: int | None = None) -> dict:
+    """Проверить, пускает ли сайт с текущего IP (или через SCRAPE_PROXY).
+
+    Возвращает словарь с кодом ответа, вердиктом и заголовком cf-ray — по его
+    суффиксу видно, через какой дата-центр Cloudflare пришёл запрос.
+    Нужно, чтобы проверять VPS и прокси ДО того, как за них платить.
+    """
+    import httpx
+
+    from proxies import mask
+
+    if proxy is None:
+        proxy = cfg.scrape_proxy or None
+    result: dict = {"proxy": mask(proxy), "proxy_url": proxy}
+
+    try:
+        with httpx.Client(
+            http2=True,
+            timeout=timeout or cfg.request_timeout,
+            follow_redirects=True,
+            proxy=proxy,
+        ) as client:
+            resp = client.get(cfg.url, headers=browser_headers(cfg))
+    except Exception as exc:
+        result.update(status=None, verdict="СЕТЬ НЕДОСТУПНА", detail=str(exc))
+        return result
+
+    result["status"] = resp.status_code
+    result["cf_ray"] = resp.headers.get("cf-ray", "—")
+    result["size"] = len(resp.text)
+
+    try:
+        _classify(resp.status_code, resp.text)
+    except CaptchaError as exc:
+        result.update(verdict="ЧЕЛЛЕНДЖ/КАПЧА", detail=str(exc))
+    except BlockedError as exc:
+        result.update(verdict="IP ЗАБЛОКИРОВАН", detail=str(exc))
+    except FetchError as exc:
+        result.update(verdict="ОШИБКА", detail=str(exc))
+    else:
+        from parser import parse
+
+        status = parse(resp.text)
+        result.update(verdict="OK, САЙТ ПУСКАЕТ", detail=f"состояние очереди: {status}")
+
+    return result
+
+
+def check_proxies(cfg: Config, proxies: list[str], workers: int = 20) -> list[str]:
+    """Проверить список прокси параллельно и вернуть те, через которые сайт пускает.
+
+    Порядок исходного списка сохраняется, чтобы результат был воспроизводим.
+    """
+    import concurrent.futures
+
+    from proxies import mask
+
+    if not proxies:
+        return []
+
+    def check(proxy: str) -> tuple[str, bool, str]:
+        result = probe(cfg, proxy=proxy, timeout=cfg.proxy_check_timeout)
+        ok = result["verdict"].startswith("OK")
+        return proxy, ok, result["verdict"]
+
+    working: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        for proxy, ok, verdict in pool.map(check, proxies):
+            log.info("  %-45s %s", mask(proxy), verdict)
+            if ok:
+                working.append(proxy)
+
+    return working
+
+
+def build_fetcher(cfg: Config, proxy_provider=None):
     """Создать бэкенд по FETCH_MODE. Режим auto стартует с direct."""
     if cfg.fetch_mode == "browser":
-        return BrowserFetcher(cfg)
-    return DirectFetcher(cfg)
+        return BrowserFetcher(cfg, proxy_provider)
+    return DirectFetcher(cfg, proxy_provider)

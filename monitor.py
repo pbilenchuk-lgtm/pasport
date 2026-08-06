@@ -29,6 +29,8 @@ import state as state_module
 from config import Config
 from fetcher import BlockedError, BrowserFetcher, CaptchaError, FetchError, build_fetcher
 from notifier import Notifier
+from proxies import ProxyPool, load_proxies
+from proxies import mask as proxy_mask
 
 log = logging.getLogger("monitor")
 
@@ -48,6 +50,9 @@ def setup_logging(level: str) -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
         stream=sys.stdout,
     )
+    # httpx логирует каждый запрос на INFO — в нашем цикле это лишний шум.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def html_escape(text: str) -> str:
@@ -59,16 +64,72 @@ class Monitor:
         self.cfg = cfg
         self.notifier = notifier
         self.state = state_module.load(cfg.state_path)
-        self.fetcher = build_fetcher(cfg)
+        self.pool = ProxyPool(load_proxies(cfg.proxy_list, cfg.proxy_list_path))
+        if self.pool.enabled:
+            log.info(
+                "Загружено прокси: %d, начинаю с %s",
+                len(self.pool),
+                proxy_mask(self.pool.current()),
+            )
+        self.fetcher = build_fetcher(cfg, self._current_proxy)
         self.tz = ZoneInfo(cfg.heartbeat_timezone)
         self.consecutive_errors = 0
         self.last_errors: list[Exception] = []
         self.switched_to_browser = False
+        self.rotations_without_success = 0
 
     # ---------------------------------------------------------------- helpers
 
     def now(self) -> datetime:
         return datetime.now(timezone.utc).astimezone(self.tz)
+
+    def _current_proxy(self) -> str | None:
+        """Адрес прокси для очередного запроса: из пула, иначе из SCRAPE_PROXY."""
+        if self.pool.enabled:
+            return self.pool.current()
+        return self.cfg.scrape_proxy or None
+
+    def precheck_proxies(self) -> None:
+        """Прогнать весь список прокси параллельно и оставить только рабочие.
+
+        Список прокси — расходник: часть адресов мертва, часть забанена сайтом.
+        Дешевле проверить их разом за пару минут на старте, чем ловить по одному
+        в основном цикле по 40 секунд на таймаут.
+        """
+        if not self.pool.enabled or not self.cfg.proxy_precheck:
+            return
+
+        log.info("Проверяю %d прокси (параллельно, это займёт минуту)...", len(self.pool))
+        working = check_proxies(self.cfg, self.pool.proxies)
+
+        if not working:
+            log.error(
+                "Ни один из %d прокси не пропускает к сайту. "
+                "Монитор продолжит пробовать, но нужен рабочий прокси.",
+                len(self.pool),
+            )
+            self.notifier.send(
+                f"⚠️ Ни один из {len(self.pool)} прокси не работает. "
+                "Монитор запущен, но достучаться до сайта не может."
+            )
+            return
+
+        log.info(
+            "Рабочих прокси: %d из %d. Использую %s",
+            len(working),
+            len(self.pool),
+            proxy_mask(working[0]),
+        )
+        self.pool = ProxyPool(working)
+
+    def rotate_proxy(self) -> bool:
+        """Взять следующий прокси из пула. False — если пул не задан."""
+        if not self.pool.enabled:
+            return False
+        self.pool.rotate()
+        self.consecutive_errors = 0
+        self.last_errors.clear()
+        return True
 
     def save(self) -> None:
         state_module.save(self.cfg.state_path, self.state)
@@ -282,6 +343,8 @@ class Monitor:
             self.cfg.jitter_seconds,
         )
 
+        self.precheck_proxies()
+
         # Проверяем доставку сразу: молчащий монитор бесполезен, и узнать об этом
         # лучше в логах на старте, а не через неделю без уведомлений.
         if not self.notifier.check():
@@ -297,16 +360,35 @@ class Monitor:
 
             if status is not None:
                 self.handle_status(status)
-            elif self.consecutive_errors >= self.cfg.error_threshold:
-                if not self.state.outage_notified:
-                    self.notify_outage(self.last_errors[-1])
-                    self.state.outage_notified = True
-                    self.save()
-                self.maybe_switch_to_browser()
-                log.warning("Пауза %d минут", self.cfg.error_pause_minutes)
-                self._interruptible_sleep(self.cfg.error_pause_minutes * 60)
-                self.consecutive_errors = 0
-                continue
+                self.pool.mark_good()
+                self.rotations_without_success = 0
+            else:
+                # Пока в пуле остались непроверенные прокси — меняем их
+                # без долгой паузы: скорее всего, дело в конкретном адресе.
+                if (
+                    self.pool.enabled
+                    and self.consecutive_errors >= self.cfg.proxy_rotate_after
+                    and self.rotations_without_success < len(self.pool)
+                ):
+                    self.rotate_proxy()
+                    self.rotations_without_success += 1
+                    self.sleep_interval()
+                    continue
+
+                pool_exhausted = (
+                    self.pool.enabled and self.rotations_without_success >= len(self.pool)
+                )
+                if self.consecutive_errors >= self.cfg.error_threshold or pool_exhausted:
+                    if not self.state.outage_notified:
+                        self.notify_outage(self.last_errors[-1])
+                        self.state.outage_notified = True
+                        self.save()
+                    self.maybe_switch_to_browser()
+                    log.warning("Пауза %d минут", self.cfg.error_pause_minutes)
+                    self._interruptible_sleep(self.cfg.error_pause_minutes * 60)
+                    self.consecutive_errors = 0
+                    self.rotations_without_success = 0
+                    continue
 
             self.maybe_heartbeat()
             self.sleep_interval()
@@ -346,6 +428,58 @@ def cmd_chat_id(cfg: Config) -> int:
     return 0
 
 
+def cmd_probe(cfg: Config) -> int:
+    """Проверка «пускает ли сайт отсюда». Запускать на кандидате в хостинг
+    или с настроенным SCRAPE_PROXY — до того, как за него платить."""
+    from fetcher import probe
+
+    result = probe(cfg)
+
+    print(f"URL:      {cfg.url}")
+    print(f"Прокси:   {result['proxy']}")
+    print(f"HTTP:     {result.get('status', '—')}")
+    print(f"cf-ray:   {result.get('cf_ray', '—')}")
+    print(f"Вердикт:  {result['verdict']}")
+    if result.get("detail"):
+        print(f"Детали:   {result['detail']}")
+
+    if result["verdict"].startswith("OK"):
+        print("\nЭтот IP годится — монитор отсюда работать будет.")
+        return 0
+
+    print(
+        "\nОтсюда монитор работать не сможет. Попробуй другой IP или задай "
+        "SCRAPE_PROXY. См. README, раздел «Если Cloudflare блокирует»."
+    )
+    return 1
+
+
+def cmd_probe_list(cfg: Config) -> int:
+    """Проверить весь список прокси и напечатать рабочие."""
+    from fetcher import check_proxies
+
+    proxies = load_proxies(cfg.proxy_list, cfg.proxy_list_path)
+    if not proxies:
+        print(
+            "Список прокси пуст. Задай PROXY_LIST (строки через перевод строки) "
+            "или PROXY_LIST_PATH (путь к файлу)."
+        )
+        return 1
+
+    print(f"Проверяю {len(proxies)} прокси...\n")
+    working = check_proxies(cfg, proxies)
+
+    print(f"\nРабочих: {len(working)} из {len(proxies)}")
+    if not working:
+        print("Ни один прокси не пропускает к сайту.")
+        return 1
+
+    print("\nГодные адреса (можно вставить в PROXY_LIST):")
+    for proxy in working:
+        print(f"  {proxy}")
+    return 0
+
+
 def cmd_simulate(cfg: Config, path: str) -> int:
     with open(path, encoding="utf-8") as fh:
         html = fh.read()
@@ -364,6 +498,16 @@ def main() -> int:
     ap.add_argument("--chat-id", action="store_true", help="показать свой chat_id")
     ap.add_argument("--simulate", metavar="FILE", help="разобрать HTML из файла")
     ap.add_argument(
+        "--probe",
+        action="store_true",
+        help="проверить, пускает ли сайт с этого IP (учитывает SCRAPE_PROXY)",
+    )
+    ap.add_argument(
+        "--probe-list",
+        action="store_true",
+        help="проверить весь список прокси и показать рабочие",
+    )
+    ap.add_argument(
         "--simulate-open",
         action="store_true",
         help="полный цикл на подменённом ответе «даты есть» (проверка уведомления)",
@@ -375,6 +519,12 @@ def main() -> int:
 
     if args.simulate:
         return cmd_simulate(cfg, args.simulate)
+
+    if args.probe:
+        return cmd_probe(cfg)
+
+    if args.probe_list:
+        return cmd_probe_list(cfg)
 
     if args.chat_id:
         return cmd_chat_id(cfg)

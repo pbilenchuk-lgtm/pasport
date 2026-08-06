@@ -20,8 +20,15 @@ services:
       - key: TELEGRAM_CHAT_ID
         sync: false
 
-      # Прокси для обхода блокировки по IP. Пустой = ходим напрямую.
-      # Формат: http://user:pass@host:port
+      # Обход блокировки по IP. С IP Render сайт отдаёт 403, поэтому без прокси
+      # монитор работать не будет — см. README, «Если Cloudflare блокирует».
+      #
+      # PROXY_LIST — список адресов через перевод строки, монитор сам выберет
+      # рабочий и переключится, если тот отвалится. Формат строки:
+      # host:port:user:pass  или  http://user:pass@host:port
+      - key: PROXY_LIST
+        sync: false
+      # Альтернатива: один адрес (или Secret File через PROXY_LIST_PATH).
       - key: SCRAPE_PROXY
         sync: false
 

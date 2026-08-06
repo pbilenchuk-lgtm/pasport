@@ -1,6 +1,11 @@
 state.json
 .state-*.json
 
+# Списки прокси содержат логины и пароли — в репозиторий им нельзя.
+proxies.txt
+proxy*.txt
+Proxy*.txt
+
 __pycache__/
 *.py[cod]
 .venv/

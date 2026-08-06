@@ -46,7 +46,16 @@ class Config:
     # browser — Playwright/Chromium (Вариант Б)
     # auto    — direct, а при блокировке автоматически переключиться на browser
     fetch_mode: str = "auto"
+    # Один прокси. Если задан список ниже, он имеет приоритет.
     scrape_proxy: str = ""
+    # Список прокси: прямо в переменной (через перевод строки/запятую) или файлом.
+    proxy_list: str = ""
+    proxy_list_path: str = ""
+    # Сколько ошибок подряд терпеть, прежде чем взять следующий прокси.
+    proxy_rotate_after: int = 3
+    # Проверять ли весь список прокси при старте, оставляя только рабочие.
+    proxy_precheck: bool = True
+    proxy_check_timeout: int = 20
 
     # --- интервалы ---
     # Для direct: 45 ± 0..15 сек. Для browser: 60 + 0..30 = 60..90 сек.
@@ -87,6 +96,11 @@ class Config:
             telegram_chat_id=_env_str("TELEGRAM_CHAT_ID"),
             fetch_mode=_env_str("FETCH_MODE", "auto").lower(),
             scrape_proxy=_env_str("SCRAPE_PROXY"),
+            proxy_list=os.environ.get("PROXY_LIST", ""),
+            proxy_list_path=_env_str("PROXY_LIST_PATH"),
+            proxy_rotate_after=_env_int("PROXY_ROTATE_AFTER", 3),
+            proxy_precheck=_env_bool("PROXY_PRECHECK", True),
+            proxy_check_timeout=_env_int("PROXY_CHECK_TIMEOUT", 20),
             interval_seconds=_env_int("INTERVAL_SECONDS", 45),
             jitter_seconds=_env_int("JITTER_SECONDS", 15),
             browser_interval_seconds=_env_int("BROWSER_INTERVAL_SECONDS", 60),
