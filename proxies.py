@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +62,23 @@ def mask(proxy: str | None) -> str:
         return f"{parts.scheme}://{user}{host}{port}"
     except ValueError:
         return "<нераспознанный прокси>"
+
+
+def split_auth(proxy: str) -> tuple[str, str | None, str | None]:
+    """Разложить URL на адрес без учётных данных, логин и пароль.
+
+    Нужно для Playwright: Chromium игнорирует логин и пароль, вписанные прямо в
+    --proxy-server, их обязательно передавать отдельными полями. Без этого
+    браузер к авторизованному прокси просто не подключится.
+    """
+    parts = urlsplit(proxy)
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port else ""
+    server = f"{parts.scheme}://{host}{port}"
+
+    username = unquote(parts.username) if parts.username else None
+    password = unquote(parts.password) if parts.password else None
+    return server, username, password
 
 
 def load_proxies(inline: str = "", path: str = "") -> list[str]:

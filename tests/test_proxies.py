@@ -10,7 +10,29 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from proxies import ProxyPool, load_proxies, mask, parse_proxy  # noqa: E402
+from proxies import ProxyPool, load_proxies, mask, parse_proxy, split_auth  # noqa: E402
+
+
+def test_split_auth_separates_credentials_for_playwright():
+    """Chromium игнорирует логин и пароль в URL — их надо отдавать отдельно."""
+    server, user, password = split_auth("http://user:pass@1.2.3.4:8000")
+    assert server == "http://1.2.3.4:8000"
+    assert (user, password) == ("user", "pass")
+    assert "user" not in server and "pass" not in server
+
+
+def test_split_auth_decodes_escaped_credentials():
+    """Пароль, закодированный при разборе строки, должен вернуться исходным."""
+    proxy = parse_proxy("1.2.3.4:8000:user:p@ss")
+    server, user, password = split_auth(proxy)
+    assert server == "http://1.2.3.4:8000"
+    assert (user, password) == ("user", "p@ss")
+
+
+def test_split_auth_without_credentials():
+    server, user, password = split_auth("http://1.2.3.4:8000")
+    assert server == "http://1.2.3.4:8000"
+    assert user is None and password is None
 
 
 def test_provider_format_host_port_user_pass():

@@ -1,17 +1,17 @@
 # Деплой на Render. Тип сервиса — Background Worker: входящий HTTP не нужен.
 #
-# По умолчанию собирается лёгкий Python-воркер (Вариант А, прямые запросы).
-# Чтобы перейти на Вариант Б (headless-браузер), см. README,
-# раздел «Переключение на браузер на Render».
+# Собирается Docker-образ с Chromium (Вариант Б). Так сделано не для красоты:
+# прямые запросы с датацентровых IP сайт отдаёт как 403, а доступные прокси
+# отвечают челленджем Cloudflare, который проходит только настоящий браузер.
+# Подробности и измерения — в README, раздел «Если Cloudflare блокирует».
 
 services:
   - type: worker
     name: passport-queue-monitor
-    runtime: python
+    runtime: docker
+    dockerfilePath: ./Dockerfile
     plan: starter
     region: frankfurt          # ближайший к Варшаве регион Render
-    buildCommand: pip install -r requirements.txt
-    startCommand: python monitor.py
 
     envVars:
       # --- секреты: значения задаются в дашборде Render, не в этом файле ---
@@ -34,11 +34,15 @@ services:
 
       # --- обычные настройки ---
       - key: FETCH_MODE
-        value: direct          # direct | browser | auto
-      - key: INTERVAL_SECONDS
+        value: browser         # direct | browser | auto
+      # В режиме браузера интервал берётся из BROWSER_*: 60 + 0..30 = 60–90 сек.
+      - key: BROWSER_INTERVAL_SECONDS
+        value: "60"
+      - key: BROWSER_JITTER_SECONDS
+        value: "30"
+      # Сколько ждать прохождения челленджа Cloudflare.
+      - key: CHALLENGE_WAIT_SECONDS
         value: "45"
-      - key: JITTER_SECONDS
-        value: "15"
       - key: ERROR_THRESHOLD
         value: "5"
       - key: ERROR_PAUSE_MINUTES

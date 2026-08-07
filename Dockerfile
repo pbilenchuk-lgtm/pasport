@@ -4,7 +4,7 @@ FROM mcr.microsoft.com/playwright/python:v1.47.0-jammy
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    FETCH_MODE=auto \
+    FETCH_MODE=browser \
     STATE_PATH=/data/state.json
 
 WORKDIR /app

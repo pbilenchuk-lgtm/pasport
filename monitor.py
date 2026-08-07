@@ -33,8 +33,11 @@ from fetcher import (
     BrowserFetcher,
     CaptchaError,
     FetchError,
+    VERDICT_CHALLENGE,
+    VERDICT_OK,
     build_fetcher,
     check_proxies,
+    usable_proxies,
 )
 from notifier import Notifier
 from proxies import ProxyPool, load_proxies
@@ -108,27 +111,47 @@ class Monitor:
             return
 
         log.info("Проверяю %d прокси (параллельно, это займёт минуту)...", len(self.pool))
-        working = check_proxies(self.cfg, self.pool.proxies)
+        results = check_proxies(self.cfg, self.pool.proxies)
 
-        if not working:
+        browser_mode = self.cfg.fetch_mode in {"browser", "auto"}
+        usable = usable_proxies(results, browser_mode=browser_mode)
+
+        clean = sum(1 for _, verdict in results if verdict == VERDICT_OK)
+        challenged = sum(1 for _, verdict in results if verdict == VERDICT_CHALLENGE)
+        log.info(
+            "Итог проверки: пропускают сразу — %d, отдают челлендж — %d, забанены — %d",
+            clean,
+            challenged,
+            len(results) - clean - challenged,
+        )
+
+        if not usable:
+            hint = ""
+            if challenged and not browser_mode:
+                hint = (
+                    f" {challenged} прокси отдают челлендж — его проходит браузер, "
+                    "поставь FETCH_MODE=browser."
+                )
             log.error(
-                "Ни один из %d прокси не пропускает к сайту. "
-                "Монитор продолжит пробовать, но нужен рабочий прокси.",
+                "Ни один из %d прокси не годится для режима %s.%s",
                 len(self.pool),
+                self.cfg.fetch_mode,
+                hint,
             )
             self.notifier.send(
-                f"⚠️ Ни один из {len(self.pool)} прокси не работает. "
-                "Монитор запущен, но достучаться до сайта не может."
+                f"⚠️ Ни один из {len(self.pool)} прокси не подошёл. "
+                "Монитор запущен, но достучаться до сайта не может." + hint
             )
             return
 
-        log.info(
-            "Рабочих прокси: %d из %d. Использую %s",
-            len(working),
-            len(self.pool),
-            proxy_mask(working[0]),
-        )
-        self.pool = ProxyPool(working)
+        if not clean and challenged:
+            log.info(
+                "Прокси без челленджа нет — работаем через те, что отдают челлендж: "
+                "браузер пройдёт его сам, полученная кука живёт в контексте"
+            )
+
+        log.info("Годных прокси: %d. Использую %s", len(usable), proxy_mask(usable[0]))
+        self.pool = ProxyPool(usable)
 
     def rotate_proxy(self) -> bool:
         """Взять следующий прокси из пула. False — если пул не задан."""

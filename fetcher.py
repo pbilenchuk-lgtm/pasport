@@ -19,12 +19,36 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import time
 
 from config import Config
 
 log = logging.getLogger(__name__)
 
 CHROMIUM_MAJOR = "150"
+
+# Признаки страницы-челленджа Cloudflare. Важно отличать её от жёсткой
+# блокировки: челлендж настоящий браузер проходит сам за несколько секунд,
+# а «Blocked for security reasons» не проходится ничем, кроме смены IP.
+CHALLENGE_MARKERS = (
+    "just a moment",
+    "cf-challenge",
+    "cdn-cgi/challenge-platform",
+    "checking your browser",
+    "enable javascript and cookies to continue",
+)
+
+# Вердикты проверки прокси.
+VERDICT_OK = "OK, САЙТ ПУСКАЕТ"
+VERDICT_CHALLENGE = "ЧЕЛЛЕНДЖ/КАПЧА"
+VERDICT_BLOCKED = "IP ЗАБЛОКИРОВАН"
+VERDICT_ERROR = "ОШИБКА"
+VERDICT_UNREACHABLE = "СЕТЬ НЕДОСТУПНА"
+
+
+def looks_like_challenge(html: str) -> bool:
+    lowered = html[:6000].lower()
+    return any(marker in lowered for marker in CHALLENGE_MARKERS)
 
 
 class FetchError(Exception):
@@ -75,16 +99,7 @@ def _classify(status: int, body: str) -> None:
             f"(правило WAF «Blocked for security reasons»)"
         )
 
-    if any(
-        marker in lowered
-        for marker in (
-            "just a moment",
-            "cf-challenge",
-            "cdn-cgi/challenge-platform",
-            "checking your browser",
-            "enable javascript and cookies to continue",
-        )
-    ):
+    if looks_like_challenge(body):
         raise CaptchaError(f"HTTP {status}: Cloudflare показывает челлендж/капчу")
 
     if status == 403:
@@ -189,7 +204,17 @@ class BrowserFetcher:
         launch_kwargs: dict = {"headless": True, "args": launch_args}
         self._launched_proxy = self.proxy_provider()
         if self._launched_proxy:
-            launch_kwargs["proxy"] = {"server": self._launched_proxy}
+            from proxies import split_auth
+
+            # Chromium не читает логин и пароль из URL прокси — только из
+            # отдельных полей, иначе подключение к авторизованному прокси падает.
+            server, username, password = split_auth(self._launched_proxy)
+            proxy_config: dict = {"server": server}
+            if username:
+                proxy_config["username"] = username
+            if password:
+                proxy_config["password"] = password
+            launch_kwargs["proxy"] = proxy_config
 
         self._browser = self._pw.chromium.launch(**launch_kwargs)
         self._context = self._browser.new_context(
@@ -234,8 +259,39 @@ class BrowserFetcher:
 
         status = resp.status if resp is not None else 0
         html = page.content()
+
+        # Cloudflare отдал челлендж — его как раз и должен пройти браузер.
+        # Страница сама выполнит проверку и перезагрузится на настоящий контент,
+        # надо только дождаться. Полученный cf_clearance живёт в контексте,
+        # поэтому следующие проверки идут уже без задержки.
+        if looks_like_challenge(html):
+            html = self._wait_for_challenge(page)
+            # Челлендж пройден — исходный 403 больше не описывает результат.
+            status = 200 if not looks_like_challenge(html) else status
+
         _classify(status, html)
         return html
+
+    def _wait_for_challenge(self, page) -> str:
+        """Дождаться, пока Cloudflare пропустит. Возвращает итоговый HTML."""
+        deadline = time.monotonic() + self.cfg.challenge_wait_seconds
+        log.info("Cloudflare показал челлендж, жду прохождения...")
+
+        while time.monotonic() < deadline:
+            page.wait_for_timeout(1500)
+            try:
+                html = page.content()
+            except Exception:
+                continue  # страница в этот момент могла перезагружаться
+            if not looks_like_challenge(html):
+                waited = self.cfg.challenge_wait_seconds - (deadline - time.monotonic())
+                log.info("Челлендж пройден за %.0f сек", waited)
+                return html
+
+        log.warning(
+            "Челлендж не пройден за %d сек", self.cfg.challenge_wait_seconds
+        )
+        return page.content()
 
     def close(self) -> None:
         for obj, method in (
@@ -276,7 +332,7 @@ def probe(cfg: Config, proxy: str | None = None, timeout: int | None = None) -> 
         ) as client:
             resp = client.get(cfg.url, headers=browser_headers(cfg))
     except Exception as exc:
-        result.update(status=None, verdict="СЕТЬ НЕДОСТУПНА", detail=str(exc))
+        result.update(status=None, verdict=VERDICT_UNREACHABLE, detail=str(exc))
         return result
 
     result["status"] = resp.status_code
@@ -286,23 +342,25 @@ def probe(cfg: Config, proxy: str | None = None, timeout: int | None = None) -> 
     try:
         _classify(resp.status_code, resp.text)
     except CaptchaError as exc:
-        result.update(verdict="ЧЕЛЛЕНДЖ/КАПЧА", detail=str(exc))
+        result.update(verdict=VERDICT_CHALLENGE, detail=str(exc))
     except BlockedError as exc:
-        result.update(verdict="IP ЗАБЛОКИРОВАН", detail=str(exc))
+        result.update(verdict=VERDICT_BLOCKED, detail=str(exc))
     except FetchError as exc:
-        result.update(verdict="ОШИБКА", detail=str(exc))
+        result.update(verdict=VERDICT_ERROR, detail=str(exc))
     else:
         from parser import parse
 
         status = parse(resp.text)
-        result.update(verdict="OK, САЙТ ПУСКАЕТ", detail=f"состояние очереди: {status}")
+        result.update(verdict=VERDICT_OK, detail=f"состояние очереди: {status}")
 
     return result
 
 
-def check_proxies(cfg: Config, proxies: list[str], workers: int = 20) -> list[str]:
-    """Проверить список прокси параллельно и вернуть те, через которые сайт пускает.
+def check_proxies(cfg: Config, proxies: list[str], workers: int = 20) -> list[tuple[str, str]]:
+    """Проверить список прокси параллельно, вернуть пары (адрес, вердикт).
 
+    Быстрая HTTP-проверка нужна не только чтобы найти пропускающие прокси, но и
+    чтобы отделить безнадёжные (жёсткий бан) от годных для браузера (челлендж).
     Порядок исходного списка сохраняется, чтобы результат был воспроизводим.
     """
     import concurrent.futures
@@ -312,19 +370,32 @@ def check_proxies(cfg: Config, proxies: list[str], workers: int = 20) -> list[st
     if not proxies:
         return []
 
-    def check(proxy: str) -> tuple[str, bool, str]:
+    def check(proxy: str) -> tuple[str, str]:
         result = probe(cfg, proxy=proxy, timeout=cfg.proxy_check_timeout)
-        ok = result["verdict"].startswith("OK")
-        return proxy, ok, result["verdict"]
+        return proxy, result["verdict"]
 
-    working: list[str] = []
+    results: list[tuple[str, str]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        for proxy, ok, verdict in pool.map(check, proxies):
+        for proxy, verdict in pool.map(check, proxies):
             log.info("  %-45s %s", mask(proxy), verdict)
-            if ok:
-                working.append(proxy)
+            results.append((proxy, verdict))
 
-    return working
+    return results
+
+
+def usable_proxies(results: list[tuple[str, str]], browser_mode: bool) -> list[str]:
+    """Отобрать прокси, которые есть смысл использовать в текущем режиме.
+
+    Прямые запросы годятся только там, где сайт пускает сразу. Браузер, кроме
+    того, умеет проходить челлендж — значит, такие адреса для него тоже годные,
+    и в списке они идут после «чистых».
+    """
+    clean = [proxy for proxy, verdict in results if verdict == VERDICT_OK]
+    if not browser_mode:
+        return clean
+
+    challenged = [proxy for proxy, verdict in results if verdict == VERDICT_CHALLENGE]
+    return clean + challenged
 
 
 def build_fetcher(cfg: Config, proxy_provider=None):

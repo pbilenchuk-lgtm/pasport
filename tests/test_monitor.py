@@ -197,14 +197,16 @@ def test_startup_check_sends_a_message():
     assert "запущен" in notifier.messages[0]
 
 
-def _patch_check_proxies(result):
+def _patch_check_proxies(verdicts):
     """Подменить check_proxies, вернув функцию восстановления.
 
     Атрибут именно подменяется, а не создаётся: если импорт в monitor.py
     пропадёт, тест упадёт на AttributeError, а не замаскирует ошибку.
     """
     original = monitor_module.check_proxies
-    monitor_module.check_proxies = lambda cfg, proxies, **kw: result(proxies)
+    monitor_module.check_proxies = lambda cfg, proxies, **kw: [
+        (proxy, verdicts[proxy]) for proxy in proxies
+    ]
 
     def restore() -> None:
         monitor_module.check_proxies = original
@@ -216,8 +218,11 @@ def test_precheck_keeps_only_working_proxies():
     mon, _ = _monitor([])
     mon.pool = monitor_module.ProxyPool(["http://a:1", "http://b:2"])
     mon.cfg.proxy_precheck = True
+    mon.cfg.fetch_mode = "direct"
 
-    restore = _patch_check_proxies(lambda proxies: proxies[:1])
+    restore = _patch_check_proxies(
+        {"http://a:1": monitor_module.VERDICT_OK, "http://b:2": "IP ЗАБЛОКИРОВАН"}
+    )
     try:
         mon.precheck_proxies()
     finally:
@@ -227,12 +232,65 @@ def test_precheck_keeps_only_working_proxies():
     assert mon.pool.current() == "http://a:1"
 
 
+def test_challenge_proxies_are_kept_for_browser_but_not_for_direct():
+    """Челлендж проходит браузер, поэтому такие прокси годятся только ему.
+
+    Именно этот случай встретился в проде: жёстко забанены не все прокси,
+    часть отдаёт решаемый челлендж.
+    """
+    verdicts = {
+        "http://a:1": monitor_module.VERDICT_CHALLENGE,
+        "http://b:2": "IP ЗАБЛОКИРОВАН",
+    }
+
+    mon, notifier = _monitor([])
+    mon.pool = monitor_module.ProxyPool(list(verdicts))
+    mon.cfg.proxy_precheck = True
+    mon.cfg.fetch_mode = "browser"
+    restore = _patch_check_proxies(verdicts)
+    try:
+        mon.precheck_proxies()
+    finally:
+        restore()
+    assert mon.pool.proxies == ["http://a:1"], "браузер должен взять челлендж-прокси"
+
+    mon2, notifier2 = _monitor([])
+    mon2.pool = monitor_module.ProxyPool(list(verdicts))
+    mon2.cfg.proxy_precheck = True
+    mon2.cfg.fetch_mode = "direct"
+    restore = _patch_check_proxies(verdicts)
+    try:
+        mon2.precheck_proxies()
+    finally:
+        restore()
+    assert len(mon2.pool) == 2, "пул не должен меняться, если годных нет"
+    assert any("FETCH_MODE=browser" in m for m in notifier2.messages), (
+        "нужно подсказать, что челлендж решается браузером"
+    )
+
+
+def test_clean_proxies_come_before_challenged_ones():
+    from fetcher import VERDICT_CHALLENGE, VERDICT_OK, usable_proxies
+
+    results = [
+        ("http://challenged:1", VERDICT_CHALLENGE),
+        ("http://clean:2", VERDICT_OK),
+        ("http://banned:3", "IP ЗАБЛОКИРОВАН"),
+    ]
+    assert usable_proxies(results, browser_mode=True) == [
+        "http://clean:2",
+        "http://challenged:1",
+    ]
+    assert usable_proxies(results, browser_mode=False) == ["http://clean:2"]
+
+
 def test_precheck_warns_when_no_proxy_works():
     mon, notifier = _monitor([])
     mon.pool = monitor_module.ProxyPool(["http://a:1"])
     mon.cfg.proxy_precheck = True
+    mon.cfg.fetch_mode = "direct"
 
-    restore = _patch_check_proxies(lambda proxies: [])
+    restore = _patch_check_proxies({"http://a:1": "IP ЗАБЛОКИРОВАН"})
     try:
         mon.precheck_proxies()
     finally:
