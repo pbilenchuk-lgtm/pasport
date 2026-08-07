@@ -40,9 +40,10 @@ services:
         value: "60"
       - key: BROWSER_JITTER_SECONDS
         value: "30"
-      # Сколько ждать прохождения челленджа Cloudflare.
+      # Сколько ждать прохождения челленджа Cloudflare. Настоящий браузер
+      # обычно проходит его за 5–10 секунд, запас взят с большим избытком.
       - key: CHALLENGE_WAIT_SECONDS
-        value: "45"
+        value: "60"
       - key: ERROR_THRESHOLD
         value: "5"
       - key: ERROR_PAUSE_MINUTES

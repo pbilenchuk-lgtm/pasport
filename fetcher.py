@@ -193,6 +193,21 @@ class BrowserFetcher:
         if self._page is not None:
             return self._page
 
+        # Дисплей поднимаем ДО старта Playwright. Драйвер Playwright — отдельный
+        # процесс, он наследует окружение в момент запуска и передаёт его
+        # браузеру. Если выставить DISPLAY после, Chromium его не увидит и
+        # упадёт с «without having a XServer running».
+        headless = self.cfg.browser_headless
+        if not headless:
+            import display
+
+            if not display.ensure():
+                log.warning(
+                    "Виртуального дисплея нет — запускаю браузер в headless. "
+                    "Cloudflare такой браузер пропускает хуже."
+                )
+                headless = True
+
         from playwright.sync_api import sync_playwright
 
         self._pw = sync_playwright().start()
@@ -205,20 +220,13 @@ class BrowserFetcher:
             # Признаки автоматизации, по которым Cloudflare отличает робота.
             "--disable-features=IsolateOrigins,site-per-process",
         ]
-        headless = self.cfg.browser_headless
-        if not headless:
-            # Дисплей поднимаем прямо сейчас: между стартом контейнера и этим
-            # моментом проходит около минуты, за неё Xvfb мог не дожить.
-            import display
-
-            if not display.ensure():
-                log.warning(
-                    "Виртуального дисплея нет — запускаю браузер в headless. "
-                    "Cloudflare такой браузер пропускает хуже."
-                )
-                headless = True
-
-        launch_kwargs: dict = {"headless": headless, "args": launch_args}
+        # env передаём явно: полагаться на то, что драйвер унаследовал DISPLAY,
+        # ненадёжно — именно на этом headful-режим и не запускался.
+        launch_kwargs: dict = {
+            "headless": headless,
+            "args": launch_args,
+            "env": dict(os.environ),
+        }
         log.info(
             "Запускаю Chromium (%s)",
             "headless" if headless else "headful, DISPLAY=" + os.environ.get("DISPLAY", "?"),
