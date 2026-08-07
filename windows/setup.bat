@@ -10,22 +10,39 @@ echo   Монитор очереди паспортного сервиса — �
 echo ==========================================================
 echo.
 
-rem --- 1. Python ---------------------------------------------------------
-where python >nul 2>&1
-if errorlevel 1 (
+rem --- 1. Python --------------------------------------------------------
+rem Ищем и py (Python install manager), и python: новый установщик может
+rem положить в PATH только py, а старый — только python.
+set "PY_CMD="
+
+py -3 --version >nul 2>&1
+if not errorlevel 1 set "PY_CMD=py -3"
+
+if not defined PY_CMD (
+	python --version >nul 2>&1
+	if not errorlevel 1 set "PY_CMD=python"
+)
+
+if not defined PY_CMD (
 	echo [!] Python не найден.
-	echo     Установи Python 3.10 или новее с https://www.python.org/downloads/
-	echo     ВАЖНО: при установке поставь галочку "Add Python to PATH".
+	echo.
+	echo     Если ты только что его установил — ЗАКРОЙ ЭТО ОКНО и открой
+	echo     файл заново. Установщик прописывает PATH, и старые окна об
+	echo     этом не знают.
+	echo.
+	echo     Если Python ещё не стоит: https://www.python.org/downloads/
 	echo.
 	pause
 	exit /b 1
 )
-echo [1/5] Python найден.
 
-rem --- 2. Виртуальное окружение -----------------------------------------
+for /f "tokens=*" %%v in ('!PY_CMD! --version 2^>^&1') do set "PY_VER=%%v"
+echo [1/5] Нашёл !PY_VER! (команда: !PY_CMD!)
+
+rem --- 2. Виртуальное окружение ----------------------------------------
 if not exist ".venv\Scripts\python.exe" (
 	echo [2/5] Создаю виртуальное окружение...
-	python -m venv .venv
+	!PY_CMD! -m venv .venv
 	if errorlevel 1 (
 		echo [!] Не удалось создать окружение.
 		pause
@@ -35,17 +52,23 @@ if not exist ".venv\Scripts\python.exe" (
 	echo [2/5] Виртуальное окружение уже есть.
 )
 
-rem --- 3. Зависимости ----------------------------------------------------
+set "VENV_PY=.venv\Scripts\python.exe"
+
+rem --- 3. Зависимости ---------------------------------------------------
 echo [3/5] Ставлю зависимости...
-".venv\Scripts\python.exe" -m pip install --quiet --upgrade pip
-".venv\Scripts\python.exe" -m pip install --quiet -r requirements.txt
+"%VENV_PY%" -m pip install --quiet --upgrade pip
+"%VENV_PY%" -m pip install --quiet -r requirements.txt
 if errorlevel 1 (
 	echo [!] Не удалось поставить зависимости.
 	pause
 	exit /b 1
 )
 
-rem --- 4. Настройки ------------------------------------------------------
+rem Необязательное дополнение. Дома оно не нужно, а под свежие версии Python
+rem сборки может не быть — поэтому неудача здесь не считается ошибкой.
+"%VENV_PY%" -m pip install --quiet -r requirements-impersonate.txt >nul 2>&1
+
+rem --- 4. Настройки -----------------------------------------------------
 if not exist ".env" (
 	echo.
 	echo [4/5] Настройка Telegram.
@@ -67,15 +90,15 @@ if not exist ".env" (
 	echo [4/5] Файл .env уже есть, оставляю как есть.
 )
 
-rem --- 5. Проверка и автозапуск -----------------------------------------
+rem --- 5. Проверка и автозапуск ----------------------------------------
 echo.
 echo [5/5] Проверяю, доходят ли уведомления...
-".venv\Scripts\python.exe" monitor.py --test-telegram
+"%VENV_PY%" monitor.py --test-telegram
 if errorlevel 1 (
 	echo.
-	echo [!] Уведомление не дошло. Самая частая причина: ты ещё не нажал
-	echo     /start в чате с ботом — Telegram не даёт боту написать первым.
-	echo     Исправь и запусти setup.bat заново.
+	echo [!] Уведомление не дошло. Самая частая причина: не нажат /start
+	echo     в чате с ботом — Telegram не даёт боту написать первым.
+	echo     Исправь и запусти этот файл заново.
 	echo.
 	pause
 	exit /b 1
@@ -83,7 +106,7 @@ if errorlevel 1 (
 
 echo.
 echo Проверяю доступ к сайту...
-".venv\Scripts\python.exe" monitor.py --probe
+"%VENV_PY%" monitor.py --probe
 if errorlevel 1 (
 	echo.
 	echo [!] С этого компьютера сайт не открывается. Автозапуск всё равно
@@ -93,7 +116,7 @@ if errorlevel 1 (
 )
 
 echo.
-".venv\Scripts\python.exe" "windows\install_task.py" %*
+"%VENV_PY%" "windows\install_task.py" %*
 if errorlevel 1 (
 	echo [!] Не удалось настроить автозапуск.
 	pause

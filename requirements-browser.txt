@@ -1,6 +1,7 @@
 # Дополнительные зависимости для Варианта Б (headless-браузер).
 # Ставятся поверх requirements.txt, нужны только при FETCH_MODE=browser или auto.
 -r requirements.txt
+-r requirements-impersonate.txt
 
 playwright==1.47.0
 
