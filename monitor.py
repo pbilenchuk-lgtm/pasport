@@ -343,6 +343,35 @@ class Monitor:
             "Слежу дальше."
         )
 
+    def coverage_line(self) -> str:
+        """Оценить, какую долю суток монитор реально следил за сайтом.
+
+        На ноутбуке, который засыпает, это главный показатель: талоны
+        появляются в произвольное время, и пропущенные часы — это пропущенные
+        шансы. Голое число проверок об этом не говорит, а доля — говорит.
+        """
+        if isinstance(self.fetcher, BrowserFetcher):
+            base, jitter = self.cfg.browser_interval_seconds, self.cfg.browser_jitter_seconds
+        else:
+            base, jitter = self.cfg.interval_seconds, self.cfg.jitter_seconds
+
+        average = base + jitter / 2
+        expected = 24 * 3600 / average
+        done = self.state.checks + self.state.errors
+        percent = min(100, round(done / expected * 100))
+
+        if percent >= 90:
+            return f"Слежка работала почти всё время ({percent}% суток)."
+        if percent >= 40:
+            return (
+                f"Слежка работала примерно {percent}% суток — "
+                "остальное время компьютер спал или был выключен."
+            )
+        return (
+            f"Слежка работала лишь {percent}% суток. Пока компьютер спит, "
+            "талоны можно пропустить: см. windows\\keep-awake.bat"
+        )
+
     def send_startup_notice(self, status: queue_parser.QueueStatus | None) -> None:
         """Отправить приветствие, если оно не превратится в спам.
 
@@ -386,6 +415,7 @@ class Monitor:
         self.notifier.send(
             f"✅ Монитор жив. За сутки проверок: {self.state.checks}, "
             f"ошибок: {self.state.errors}.\n"
+            f"{self.coverage_line()}\n"
             f"Режим: {backend}. Текущее состояние очереди: {self.state.queue_state}.",
             silent=True,
         )

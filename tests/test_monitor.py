@@ -163,6 +163,39 @@ def test_heartbeat_fires_once_per_day():
     assert mon.state.checks == 0  # счётчики обнулились после отправки
 
 
+def test_coverage_shows_how_much_of_the_day_was_watched():
+    """На засыпающем ноутбуке важно видеть простой, а не только число проверок."""
+    mon, _ = _monitor([])
+    expected = 24 * 3600 / (mon.cfg.interval_seconds + mon.cfg.jitter_seconds / 2)
+
+    mon.state.checks = int(expected)
+    assert "почти всё время" in mon.coverage_line()
+
+    mon.state.checks = int(expected * 0.5)
+    line = mon.coverage_line()
+    assert "спал" in line and "50%" in line
+
+    mon.state.checks = int(expected * 0.1)
+    line = mon.coverage_line()
+    assert "keep-awake" in line, "при большом простое нужна подсказка"
+
+
+def test_coverage_never_exceeds_one_hundred_percent():
+    mon, _ = _monitor([])
+    mon.state.checks = 10**6
+    assert "100%" in mon.coverage_line() or "почти всё время" in mon.coverage_line()
+
+
+def test_heartbeat_includes_coverage():
+    mon, notifier = _monitor([_fixture("closed.html")])
+    _step(mon)
+    mon.cfg.heartbeat_hour = 0
+    mon.maybe_heartbeat()
+
+    heartbeat = next(m for m in notifier.messages if "Монитор жив" in m)
+    assert "суток" in heartbeat
+
+
 def test_state_survives_restart():
     """После рестарта монитор помнит, о чём уже уведомлял."""
     mon, notifier = _monitor([_fixture("open.html")])
