@@ -54,12 +54,28 @@ def _handle_signal(signum, _frame):
     _stop = True
 
 
-def setup_logging(level: str) -> None:
+def setup_logging(level: str, log_file: str = "") -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+
+    if log_file:
+        # Фоновый запуск (планировщик Windows) идёт без консоли — без файла
+        # логов разбираться в проблемах будет не по чему.
+        from logging.handlers import RotatingFileHandler
+
+        try:
+            handlers.append(
+                RotatingFileHandler(
+                    log_file, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+                )
+            )
+        except OSError as exc:
+            print(f"Не удалось открыть файл логов {log_file}: {exc}", file=sys.stderr)
+
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        stream=sys.stdout,
+        handlers=handlers,
     )
     # httpx логирует каждый запрос на INFO — в нашем цикле это лишний шум.
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -251,6 +267,27 @@ class Monitor:
     def notify_recovered(self) -> None:
         self.notifier.send("✅ Связь с сайтом восстановилась, продолжаю следить.", silent=True)
 
+    def startup_message(self, status: queue_parser.QueueStatus | None) -> str:
+        """Приветствие с текущим состоянием очереди.
+
+        Отдельное сообщение «просто запустился» бесполезно, а вот «запустился,
+        сейчас мест нет» сразу отвечает на вопрос, ради которого сюда смотрят.
+        """
+        if status is None:
+            return (
+                "🚀 <b>Монитор запущен</b>, но сайт сейчас не отвечает.\n"
+                "Продолжаю пробовать."
+            )
+        if status.state == queue_parser.OPEN:
+            dates = ", ".join(status.dates) if status.dates else "даты не распознаны"
+            return f"🚀 <b>Монитор запущен.</b> Прямо сейчас места ЕСТЬ: {html_escape(dates)}"
+        if status.state == queue_parser.CLOSED:
+            return "🚀 <b>Монитор запущен.</b> Сейчас мест нет — слежу и сообщу, когда появятся."
+        return (
+            "🚀 <b>Монитор запущен</b>, но состояние очереди распознать не удалось. "
+            "Слежу дальше."
+        )
+
     def maybe_heartbeat(self) -> None:
         """Раз в сутки в HEARTBEAT_HOUR сообщить, что монитор жив."""
         now = self.now()
@@ -393,15 +430,24 @@ class Monitor:
 
         self.precheck_proxies()
 
-        # Проверяем доставку сразу: молчащий монитор бесполезен, и узнать об этом
-        # лучше в логах на старте, а не через неделю без уведомлений.
-        if not self.notifier.check():
+        # Первая проверка идёт до приветственного сообщения, чтобы отправить
+        # одно письмо вместо двух и сразу сказать, как дела на сайте. Это важно
+        # для машины, которая засыпает: после каждого пробуждения видно, что
+        # слежка возобновилась и что происходит с очередью прямо сейчас.
+        first = self.check_once()
+        if first is not None:
+            self.handle_status(first)
+
+        if not self.notifier.send(self.startup_message(first), silent=True):
             log.error(
                 "!!! УВЕДОМЛЕНИЯ НЕ ДОХОДЯТ. Монитор продолжит следить за сайтом, "
                 "но сообщить о датах не сможет, пока это не исправлено. !!!"
             )
         else:
             log.info("Самопроверка Telegram пройдена — уведомления доходят")
+
+        self.maybe_heartbeat()
+        self.sleep_interval()
 
         while not _stop:
             status = self.check_once()
@@ -561,7 +607,7 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = Config.from_env()
-    setup_logging(cfg.log_level)
+    setup_logging(cfg.log_level, cfg.log_file)
 
     if args.simulate:
         return cmd_simulate(cfg, args.simulate)

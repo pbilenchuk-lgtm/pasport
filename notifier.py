@@ -118,12 +118,6 @@ class Notifier:
         if hint:
             log.error("ЧТО ДЕЛАТЬ: %s", hint)
 
-    def check(self) -> bool:
-        """Стартовая самопроверка: убедиться, что сообщения реально доходят."""
-        return self.send(
-            "🚀 Монитор очереди запущен и следит за появлением дат.", silent=True
-        )
-
     def get_updates(self) -> dict:
         """Вспомогательное: посмотреть входящие, чтобы узнать свой chat_id."""
         url = f"{API_BASE}/bot{self.token}/getUpdates"

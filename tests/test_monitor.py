@@ -36,9 +36,6 @@ class FakeNotifier:
         self.messages.append(text)
         return True
 
-    def check(self) -> bool:
-        return self.send("🚀 Монитор очереди запущен", silent=True)
-
 
 class FakeFetcher:
     """Отдаёт заранее заданную последовательность ответов или ошибок."""
@@ -191,10 +188,48 @@ def test_telegram_errors_get_actionable_hints():
     assert notifier_module.explain("что-то совсем неизвестное") == ""
 
 
-def test_startup_check_sends_a_message():
-    mon, notifier = _monitor([])
-    assert mon.notifier.check() is True
-    assert "запущен" in notifier.messages[0]
+def test_startup_message_reports_current_state():
+    """После каждого пробуждения машины видно, что происходит с очередью."""
+    mon, _ = _monitor([])
+
+    closed = queue_parser.parse(_fixture("closed.html"))
+    assert "мест нет" in mon.startup_message(closed)
+
+    opened = queue_parser.parse(_fixture("open.html"))
+    message = mon.startup_message(opened)
+    assert "ЕСТЬ" in message and "12.08" in message
+
+    assert "не отвечает" in mon.startup_message(None)
+
+
+def test_env_file_does_not_override_real_environment():
+    """Переменные Render и systemd должны быть главнее файла .env."""
+    import config as config_module
+
+    handle, path = tempfile.mkstemp(suffix=".env")
+    with os.fdopen(handle, "w", encoding="utf-8") as fh:
+        fh.write("# комментарий\n")
+        fh.write("PASPORT_TEST_NEW=из_файла\n")
+        fh.write('PASPORT_TEST_EXISTING="из_файла"\n')
+        fh.write("мусор без равно\n")
+
+    os.environ["PASPORT_TEST_EXISTING"] = "из_окружения"
+    os.environ.pop("PASPORT_TEST_NEW", None)
+    try:
+        applied = config_module.load_env_file(path)
+        assert applied == 1
+        assert os.environ["PASPORT_TEST_NEW"] == "из_файла"
+        assert os.environ["PASPORT_TEST_EXISTING"] == "из_окружения"
+    finally:
+        os.unlink(path)
+        os.environ.pop("PASPORT_TEST_NEW", None)
+        os.environ.pop("PASPORT_TEST_EXISTING", None)
+
+
+def test_missing_env_file_is_not_an_error():
+    import config as config_module
+
+    assert config_module.load_env_file("/nonexistent/.env") == 0
 
 
 def _patch_check_proxies(verdicts):

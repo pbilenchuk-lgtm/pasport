@@ -7,8 +7,42 @@ from dataclasses import dataclass, field
 
 TARGET_URL = "https://warszawa.pasport.org.ua/solutions/e-queue"
 
+# Файл с настройками рядом с кодом. Нужен в первую очередь для Windows: там
+# монитор запускает планировщик задач, и обычные переменные среды задавать
+# неудобно. Настоящие переменные окружения всегда важнее файла.
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
 # Ниже 30 секунд опускаться нельзя — риск бана IP.
 MIN_INTERVAL_SECONDS = 30
+
+
+def load_env_file(path: str = ENV_FILE) -> int:
+    """Подгрузить настройки из .env. Возвращает число применённых строк.
+
+    Формат простой: KEY=VALUE, строки с # игнорируются. Значение, уже заданное
+    в окружении, не перезаписывается — так переменные Render/systemd остаются
+    главнее файла.
+    """
+    if not os.path.exists(path):
+        return 0
+
+    applied = 0
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+                    applied += 1
+    except OSError:
+        return applied
+
+    return applied
 
 
 def _env_int(name: str, default: int) -> int:
@@ -85,6 +119,8 @@ class Config:
     # --- прочее ---
     notify_on_close: bool = False
     log_level: str = "INFO"
+    # Файл для логов. Нужен, когда монитор работает фоном без консоли (Windows).
+    log_file: str = ""
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
@@ -95,6 +131,8 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
+        load_env_file()
+
         cfg = cls(
             url=_env_str("TARGET_URL", TARGET_URL),
             telegram_token=_env_str("TELEGRAM_BOT_TOKEN"),
@@ -120,6 +158,7 @@ class Config:
             state_path=_env_str("STATE_PATH", "state.json"),
             notify_on_close=_env_bool("NOTIFY_ON_CLOSE", False),
             log_level=_env_str("LOG_LEVEL", "INFO").upper(),
+            log_file=_env_str("LOG_FILE"),
         )
 
         if cfg.fetch_mode not in {"auto", "direct", "browser"}:

@@ -10,7 +10,13 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Токен и chat_id хранятся здесь — в репозиторий им нельзя.
 .env
+
+# Логи фонового запуска.
+monitor.log
+monitor.log.*
 
 *.har
 debug-*.html
