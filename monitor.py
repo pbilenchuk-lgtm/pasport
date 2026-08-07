@@ -343,6 +343,37 @@ class Monitor:
             "Слежу дальше."
         )
 
+    def send_startup_notice(self, status: queue_parser.QueueStatus | None) -> None:
+        """Отправить приветствие, если оно не превратится в спам.
+
+        Приветствие полезно на машине, которая засыпает: после пробуждения
+        видно, что слежка возобновилась. Но при перезапусках подряд — а на
+        хостинге они идут пачками, если процессу не хватает памяти — те же
+        сообщения превращаются в поток. Поэтому чаще раза в
+        STARTUP_NOTICE_COOLDOWN_MINUTES приветствие не отправляется.
+        """
+        since = time.time() - self.state.last_startup_notified
+        cooldown = self.cfg.startup_notice_cooldown_minutes * 60
+
+        if self.state.last_startup_notified and since < cooldown:
+            log.info(
+                "Приветствие пропущено: прошлое было %.0f мин назад "
+                "(частые перезапуски — не повод спамить)",
+                since / 60,
+            )
+            return
+
+        if not self.notifier.send(self.startup_message(status), silent=True):
+            log.error(
+                "!!! УВЕДОМЛЕНИЯ НЕ ДОХОДЯТ. Монитор продолжит следить за сайтом, "
+                "но сообщить о датах не сможет, пока это не исправлено. !!!"
+            )
+            return
+
+        log.info("Самопроверка Telegram пройдена — уведомления доходят")
+        self.state.last_startup_notified = time.time()
+        self.save()
+
     def maybe_heartbeat(self) -> None:
         """Раз в сутки в HEARTBEAT_HOUR сообщить, что монитор жив."""
         now = self.now()
@@ -496,13 +527,7 @@ class Monitor:
         if first is not None:
             self.handle_status(first)
 
-        if not self.notifier.send(self.startup_message(first), silent=True):
-            log.error(
-                "!!! УВЕДОМЛЕНИЯ НЕ ДОХОДЯТ. Монитор продолжит следить за сайтом, "
-                "но сообщить о датах не сможет, пока это не исправлено. !!!"
-            )
-        else:
-            log.info("Самопроверка Telegram пройдена — уведомления доходят")
+        self.send_startup_notice(first)
 
         self.maybe_heartbeat()
         self.sleep_interval()
@@ -581,16 +606,23 @@ def cmd_chat_id(cfg: Config) -> int:
 
 
 def cmd_probe(cfg: Config) -> int:
-    """Проверка «пускает ли сайт отсюда». Запускать на кандидате в хостинг
-    или с настроенным SCRAPE_PROXY — до того, как за него платить."""
-    from fetcher import probe
+    """Проверка «пускает ли сайт отсюда».
 
-    result = probe(cfg)
+    Способ проверки берётся из FETCH_MODE: прямой HTTP-клиент челлендж пройти
+    не может в принципе, поэтому для браузерного режима проверять надо тоже
+    браузером — иначе получим ложную тревогу там, где всё работает.
+    """
+    from fetcher import probe, probe_browser
+
+    browser_mode = cfg.fetch_mode in {"browser", "auto"}
+    result = probe_browser(cfg) if browser_mode else probe(cfg)
 
     print(f"URL:      {cfg.url}")
+    print(f"Проверка: {result.get('backend', 'прямой запрос')}")
     print(f"Прокси:   {result['proxy']}")
-    print(f"HTTP:     {result.get('status', '—')}")
-    print(f"cf-ray:   {result.get('cf_ray', '—')}")
+    if "status" in result:
+        print(f"HTTP:     {result.get('status', '—')}")
+        print(f"cf-ray:   {result.get('cf_ray', '—')}")
     print(f"Вердикт:  {result['verdict']}")
     if result.get("detail"):
         print(f"Детали:   {result['detail']}")
@@ -598,6 +630,13 @@ def cmd_probe(cfg: Config) -> int:
     if result["verdict"].startswith("OK"):
         print("\nЭтот IP годится — монитор отсюда работать будет.")
         return 0
+
+    if not browser_mode and result["verdict"] == "ЧЕЛЛЕНДЖ/КАПЧА":
+        print(
+            "\nСайт показывает проверку Cloudflare. Это не бан: её проходит\n"
+            "настоящий браузер. Поставь FETCH_MODE=browser и проверь снова."
+        )
+        return 1
 
     print(
         "\nОтсюда монитор работать не сможет. Попробуй другой IP или задай "

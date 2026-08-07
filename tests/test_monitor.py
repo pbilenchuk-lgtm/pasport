@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -186,6 +187,49 @@ def test_telegram_errors_get_actionable_hints():
     assert "/start" in notifier_module.explain("Forbidden: bot was blocked by the user")
     assert "BotFather" in notifier_module.explain("Unauthorized")
     assert notifier_module.explain("что-то совсем неизвестное") == ""
+
+
+def test_repeated_restarts_do_not_spam_startup_messages():
+    """Перезапуски идут пачками — одинаковые приветствия читать невозможно."""
+    closed = queue_parser.parse(_fixture("closed.html"))
+
+    mon, notifier = _monitor([])
+    mon.send_startup_notice(closed)
+    assert len(notifier.messages) == 1
+
+    # Пять перезапусков подряд с общим файлом состояния.
+    for _ in range(5):
+        restarted, again = _monitor([])
+        restarted.cfg.state_path = mon.cfg.state_path
+        restarted.state = monitor_module.state_module.load(mon.cfg.state_path)
+        restarted.send_startup_notice(closed)
+        assert again.messages == [], "приветствие должно быть подавлено"
+
+
+def test_startup_message_returns_after_cooldown():
+    closed = queue_parser.parse(_fixture("closed.html"))
+
+    mon, notifier = _monitor([])
+    mon.send_startup_notice(closed)
+    assert len(notifier.messages) == 1
+
+    # Прошло больше часа — снова уместно.
+    mon.state.last_startup_notified -= mon.cfg.startup_notice_cooldown_minutes * 60 + 1
+    mon.send_startup_notice(closed)
+    assert len(notifier.messages) == 2
+
+
+def test_dates_still_notify_during_startup_cooldown():
+    """Подавление приветствий не должно глушить главное — сообщение о датах."""
+    mon, notifier = _monitor([_fixture("open.html")])
+    mon.state.last_startup_notified = time.time()
+
+    status = mon.check_once()
+    mon.handle_status(status)
+    mon.send_startup_notice(status)
+
+    assert any("Появились даты" in m for m in notifier.messages)
+    assert not any("Монитор запущен" in m for m in notifier.messages)
 
 
 def test_startup_message_reports_current_state():

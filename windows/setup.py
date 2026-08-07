@@ -65,16 +65,23 @@ def step_venv() -> bool:
 
 
 def step_dependencies() -> bool:
-    say("[2/4] Ставлю зависимости (это займёт минуту)...")
+    say("[2/5] Ставлю зависимости (это займёт минуту)...")
     run([VENV_PY, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
 
-    code = run([VENV_PY, "-m", "pip", "install", "--quiet", "-r", "requirements.txt"])
-    if code != 0:
+    if run([VENV_PY, "-m", "pip", "install", "--quiet", "-r", "requirements.txt"]) != 0:
         return False
 
-    # Необязательное дополнение: нужно только там, где Cloudflare придирается к
-    # прямым запросам. Дома не требуется, поэтому неудача здесь не критична.
-    run([VENV_PY, "-m", "pip", "install", "--quiet", "-r", "requirements-impersonate.txt"])
+    # Браузер нужен по делу: сайт закрыт проверкой Cloudflare, и обычный
+    # HTTP-клиент её не проходит — только настоящий Chromium.
+    say("      Ставлю браузер (около 150 МБ, это дольше)...")
+    if run([VENV_PY, "-m", "pip", "install", "--quiet", "-r", "requirements-browser.txt"]) != 0:
+        say("      Не удалось поставить playwright.")
+        return False
+
+    if run([VENV_PY, "-m", "playwright", "install", "chromium"]) != 0:
+        say("      Не удалось скачать Chromium.")
+        return False
+
     return True
 
 
@@ -105,11 +112,11 @@ def step_settings() -> bool:
     chat_id = existing.get("TELEGRAM_CHAT_ID", "")
 
     if TOKEN_RE.match(token) and CHAT_ID_RE.match(chat_id):
-        say("[3/4] Настройки уже заданы в файле .env.")
+        say("[3/5] Настройки уже заданы в файле .env.")
         return True
 
     say()
-    say("[3/4] Настройка Telegram.")
+    say("[3/5] Настройка Telegram.")
     say()
     say("    Токен берётся у @BotFather и выглядит так: 1234567890:AAxxxxxxxx")
     say("    Свой chat_id можно узнать у бота @userinfobot — это число.")
@@ -127,27 +134,69 @@ def step_settings() -> bool:
     if not CHAT_ID_RE.match(chat_id):
         chat_id = ask("TELEGRAM_CHAT_ID:  ", CHAT_ID_RE, "Это должно быть число.")
 
-    existing.update(
-        {
-            "TELEGRAM_BOT_TOKEN": token,
-            "TELEGRAM_CHAT_ID": chat_id,
-            "FETCH_MODE": existing.get("FETCH_MODE", "direct"),
-            "LOG_FILE": existing.get("LOG_FILE", "monitor.log"),
-        }
-    )
-
-    with open(ENV_FILE, "w", encoding="utf-8") as fh:
-        for key, value in existing.items():
-            fh.write(f"{key}={value}\n")
+    existing.update({"TELEGRAM_BOT_TOKEN": token, "TELEGRAM_CHAT_ID": chat_id})
+    write_env(existing)
 
     say()
     say("    Сохранил в файл .env — там же всё можно поменять.")
     return True
 
 
-def step_checks_and_autostart(extra_args: list[str]) -> bool:
+def write_env(values: dict[str, str]) -> None:
+    values.setdefault("FETCH_MODE", "browser")
+    values.setdefault("LOG_FILE", "monitor.log")
+    with open(ENV_FILE, "w", encoding="utf-8") as fh:
+        for key, value in values.items():
+            fh.write(f"{key}={value}\n")
+
+
+def step_pick_browser_mode() -> bool:
+    """Подобрать режим браузера, который проходит проверку Cloudflare.
+
+    Сначала пробуем скрытый браузер: он не мозолит глаза. Если Cloudflare его
+    не пропускает — переходим на обычный, с окном за пределами экрана.
+    Результат записываем в .env, чтобы монитор не подбирал это каждый раз.
+    """
     say()
-    say("[4/4] Проверяю, доходят ли уведомления...")
+    say("[4/5] Подбираю режим браузера (проверка Cloudflare)...")
+
+    for headless, label in ((True, "скрытый"), (False, "обычный")):
+        say(f"      Пробую {label} браузер...")
+        env = dict(os.environ)
+        env["FETCH_MODE"] = "browser"
+        env["BROWSER_HEADLESS"] = "true" if headless else "false"
+
+        result = subprocess.run(
+            [VENV_PY, "monitor.py", "--probe"],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode == 0:
+            say(f"      Подходит: {label} браузер.")
+            values = read_env()
+            values["FETCH_MODE"] = "browser"
+            values["BROWSER_HEADLESS"] = "true" if headless else "false"
+            write_env(values)
+            return True
+
+        for line in (result.stdout or "").splitlines():
+            if line.startswith(("Вердикт", "Детали")):
+                say("        " + line.strip())
+
+    say()
+    say("[!] Сайт не открылся ни скрытым, ни обычным браузером.")
+    say("    Автозапуск всё равно настрою — возможно, это временно.")
+    say("    Проверить вручную:  .venv\\Scripts\\python.exe monitor.py --probe")
+    return False
+
+
+def step_telegram_check() -> bool:
+    say()
+    say("[4/5] Проверяю, доходят ли уведомления...")
     if run([VENV_PY, "monitor.py", "--test-telegram"], quiet=False) != 0:
         say()
         say("[!] Уведомление не дошло.")
@@ -155,16 +204,12 @@ def step_checks_and_autostart(extra_args: list[str]) -> bool:
         say("    Telegram не даёт боту написать первым.")
         say("    Исправь и запусти setup.bat заново.")
         return False
+    return True
 
-    say()
-    say("Проверяю доступ к сайту...")
-    if run([VENV_PY, "monitor.py", "--probe"], quiet=False) != 0:
-        say()
-        say("[!] С этого компьютера сайт не открылся. Автозапуск всё равно настрою,")
-        say("    но проверь интернет и открой ссылку в браузере:")
-        say("    https://warszawa.pasport.org.ua/solutions/e-queue")
 
+def step_autostart(extra_args: list[str]) -> bool:
     say()
+    say("[5/5] Настраиваю автозапуск...")
     task_script = os.path.join(ROOT, "windows", "install_task.py")
     return run([VENV_PY, task_script] + extra_args, quiet=False) == 0
 
@@ -188,13 +233,24 @@ def main() -> int:
     if not step_settings():
         return fail("Настройки не заданы.")
 
-    if not step_checks_and_autostart(sys.argv[1:]):
+    if not step_telegram_check():
         return 1
+
+    site_ok = step_pick_browser_mode()
+
+    if not step_autostart(sys.argv[1:]):
+        return fail("Не удалось настроить автозапуск.")
 
     say()
     say("==========================================================")
-    say("  Готово. Монитор работает в фоне и стартует сам")
-    say("  при входе в систему.")
+    if site_ok:
+        say("  Готово. Монитор работает в фоне и стартует сам")
+        say("  при входе в систему.")
+        say()
+        say("  В Telegram придёт сводка о текущем состоянии очереди.")
+    else:
+        say("  Автозапуск настроен, но сайт сейчас не открывается.")
+        say("  Монитор будет пробовать дальше и сообщит, когда получится.")
     say()
     say("  Логи:      monitor.log")
     say("  Настройки: .env")

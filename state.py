@@ -30,6 +30,11 @@ class State:
     errors: int = 0
     last_heartbeat_day: str = ""
 
+    # Когда в последний раз отправлялось приветствие. Нужно, чтобы перезапуски
+    # (а при нехватке памяти они идут пачками) не превращались в поток
+    # одинаковых сообщений.
+    last_startup_notified: float = 0.0
+
     # Флаги, чтобы не спамить одинаковыми предупреждениями.
     outage_notified: bool = False
     unknown_streak: int = 0

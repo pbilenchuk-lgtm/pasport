@@ -229,6 +229,12 @@ class BrowserFetcher:
             "--renderer-process-limit=1",
             "--js-flags=--max-old-space-size=192",
         ]
+
+        if not headless and os.name == "nt":
+            # На Windows браузер работает на настоящем рабочем столе, и окно
+            # мозолило бы глаза каждую проверку. Уводим его за пределы экрана:
+            # для Cloudflare браузер остаётся обычным, а пользователю не мешает.
+            launch_args.append("--window-position=-32000,-32000")
         # env передаём явно: полагаться на то, что драйвер унаследовал DISPLAY,
         # ненадёжно — именно на этом headful-режим и не запускался.
         launch_kwargs: dict = {
@@ -458,6 +464,41 @@ def probe(cfg: Config, proxy: str | None = None, timeout: int | None = None) -> 
 
         status = parse(resp.text)
         result.update(verdict=VERDICT_OK, detail=f"состояние очереди: {status}")
+
+    return result
+
+
+def probe_browser(cfg: Config, proxy: str | None = None) -> dict:
+    """Проверить доступ к сайту настоящим браузером.
+
+    Отдельно от probe(), потому что обычный HTTP-клиент челлендж пройти не
+    может в принципе: он покажет «ЧЕЛЛЕНДЖ/КАПЧА» даже там, где браузер
+    спокойно работает. Для FETCH_MODE=browser правду говорит только это.
+    """
+    from proxies import mask
+
+    result: dict = {"proxy": mask(proxy), "backend": "браузер"}
+    fetcher = BrowserFetcher(cfg, proxy_provider=lambda: proxy)
+
+    try:
+        html = fetcher.fetch()
+    except CaptchaError as exc:
+        result.update(verdict=VERDICT_CHALLENGE, detail=str(exc))
+    except BlockedError as exc:
+        result.update(verdict=VERDICT_BLOCKED, detail=str(exc))
+    except FetchError as exc:
+        result.update(verdict=VERDICT_ERROR, detail=str(exc))
+    else:
+        from parser import parse
+
+        status = parse(html)
+        result.update(
+            verdict=VERDICT_OK,
+            size=len(html),
+            detail=f"состояние очереди: {status}",
+        )
+    finally:
+        fetcher.close()
 
     return result
 

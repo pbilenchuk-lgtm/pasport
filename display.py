@@ -19,6 +19,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import time
 
 log = logging.getLogger(__name__)
@@ -105,6 +106,10 @@ def ensure(width: int = 1280, height: int = 800) -> bool:
     Возвращает True, если headful-браузер запускать можно.
     """
     global _process, _display
+
+    # В Windows и macOS есть настоящий рабочий стол — виртуальный не нужен.
+    if os.name != "posix" or sys.platform == "darwin":
+        return True
 
     # Дисплей уже дал кто-то снаружи (например, xvfb-run или рабочая машина).
     external = os.environ.get("DISPLAY")

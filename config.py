@@ -118,6 +118,9 @@ class Config:
     # --- сердцебиение ---
     heartbeat_hour: int = 10
     heartbeat_timezone: str = "Europe/Warsaw"
+    # Не слать приветствие чаще, чем раз в столько минут: перезапуски идут
+    # пачками, а одинаковые сообщения подряд читать невозможно.
+    startup_notice_cooldown_minutes: int = 60
 
     # --- состояние ---
     state_path: str = "state.json"
@@ -164,6 +167,7 @@ class Config:
             error_pause_minutes=_env_int("ERROR_PAUSE_MINUTES", 15),
             heartbeat_hour=_env_int("HEARTBEAT_HOUR", 10),
             heartbeat_timezone=_env_str("HEARTBEAT_TIMEZONE", "Europe/Warsaw"),
+            startup_notice_cooldown_minutes=_env_int("STARTUP_NOTICE_COOLDOWN_MINUTES", 60),
             state_path=_env_str("STATE_PATH", "state.json"),
             notify_on_close=_env_bool("NOTIFY_ON_CLOSE", False),
             log_level=_env_str("LOG_LEVEL", "INFO").upper(),
