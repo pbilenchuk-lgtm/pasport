@@ -47,18 +47,29 @@ def run(args: list[str], quiet: bool = True) -> int:
         errors="replace",
     )
     if quiet and result.returncode != 0:
-        # Показываем вывод только когда что-то пошло не так.
-        say((result.stdout or "").strip()[-2000:])
-        say((result.stderr or "").strip()[-2000:])
+        output = ((result.stdout or "") + (result.stderr or "")).strip()
+        # Вывод pip при неудаче огромный, а суть — в паре строк. Если это
+        # попытка собрать пакет из исходников, скажем прямо, что делать.
+        if "Microsoft Visual C++" in output or "failed building wheel" in output.lower():
+            say()
+            say("[!] Pip попытался собрать пакет из исходников, а компилятора нет.")
+            say("    Это значит, что под твою версию Python готовой сборки пока")
+            say("    не выпустили. Самое простое — поставить версию постарше:")
+            say()
+            say("        py install 3.13")
+            say()
+            say("    затем удалить папку .venv и запустить setup.bat заново.")
+        else:
+            say(output[-2000:])
     return result.returncode
 
 
 def step_venv() -> bool:
     if os.path.exists(VENV_PY):
-        say("[1/4] Виртуальное окружение уже есть.")
+        say("[1/5] Виртуальное окружение уже есть.")
         return True
 
-    say("[1/4] Создаю виртуальное окружение...")
+    say("[1/5] Создаю виртуальное окружение...")
     if run([sys.executable, "-m", "venv", VENV_DIR]) != 0:
         return False
     return os.path.exists(VENV_PY)

@@ -87,6 +87,36 @@ def test_setup_bat_supports_both_python_launchers():
     assert "python --version" in content
 
 
+def test_browser_requirements_avoid_source_builds():
+    """playwright до 1.55 прибит к greenlet==3.0.3.
+
+    У этого greenlet нет готовых сборок под свежие версии Python, поэтому pip
+    пытается собрать его сам и падает на отсутствии Visual C++ — именно так
+    установка и сломалась на машине пользователя. Начиная с 1.55 требование
+    ослаблено до greenlet>=3.1.1, где сборки есть.
+    """
+    import re
+
+    root = os.path.dirname(WINDOWS_DIR)
+    with open(os.path.join(root, "requirements-browser.txt"), encoding="utf-8") as fh:
+        content = fh.read()
+
+    match = re.search(r"^playwright\s*([<>=!~]+)\s*([\d.]+)", content, re.M)
+    assert match, "в requirements-browser.txt нет строки с playwright"
+
+    operator, version = match.group(1), match.group(2)
+    parts = [int(x) for x in version.split(".")]
+
+    assert operator != "==", (
+        "playwright не должен быть прибит точной версией: старые релизы тянут "
+        "greenlet без готовых сборок под новые версии Python"
+    )
+    assert (parts[0], parts[1]) >= (1, 55), (
+        f"playwright {version} тянет greenlet==3.0.3, который придётся "
+        "компилировать. Нужна версия не ниже 1.55"
+    )
+
+
 def test_setup_py_is_valid_python():
     import ast
 

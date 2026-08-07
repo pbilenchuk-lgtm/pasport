@@ -13,8 +13,14 @@ ENV BROWSER_HEADLESS=false
 
 WORKDIR /app
 
-COPY requirements.txt requirements-browser.txt ./
+COPY requirements.txt requirements-impersonate.txt requirements-browser.txt ./
 RUN pip install --no-cache-dir -r requirements-browser.txt
+
+# Браузеры в образе собраны под ту версию Playwright, что указана в его теге.
+# Мы ставим Playwright новее (из-за greenlet — см. requirements-browser.txt),
+# поэтому нужную ревизию Chromium докачиваем сами. Системные библиотеки для
+# него в образе уже есть.
+RUN playwright install chromium
 
 COPY . .
 

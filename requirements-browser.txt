@@ -1,10 +1,16 @@
-# Дополнительные зависимости для Варианта Б (headless-браузер).
-# Ставятся поверх requirements.txt, нужны только при FETCH_MODE=browser или auto.
+# Зависимости для работы через настоящий браузер (Вариант Б).
+# Нужны при FETCH_MODE=browser или auto.
 -r requirements.txt
 -r requirements-impersonate.txt
 
-playwright==1.47.0
+# Нижняя граница версии здесь не для новизны, а по необходимости.
+# Playwright тянет greenlet — пакет с бинарным расширением. Версии до 1.55
+# прибиты к greenlet==3.0.3, у которого нет готовых сборок под свежие версии
+# Python: pip пытается собрать его сам и упирается в отсутствие компилятора
+# («Microsoft Visual C++ 14.0 or greater is required»). Начиная с 1.55
+# требование ослаблено до greenlet>=3.1.1, а такие сборки уже есть.
+playwright>=1.55
 
-# Маскирует признаки автоматизации. Версия 2.x свежее и прячет больше, чем 1.x;
-# fetcher.py умеет оба API, так что откат на 1.0.6 тоже рабочий.
-playwright-stealth==2.0.3
+# Маскирует признаки автоматизации. fetcher.py умеет и старый API (1.x,
+# stealth_sync), и новый (2.x, Stealth().apply_stealth_sync).
+playwright-stealth>=2.0.3
