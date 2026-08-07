@@ -719,7 +719,8 @@ def main() -> int:
         return cmd_chat_id(cfg)
 
     cfg.require_telegram()
-    notifier = Notifier(cfg.telegram_token, cfg.telegram_chat_id)
+    notifier = Notifier(cfg.telegram_token, cfg.telegram_chat_id, source=cfg.instance_name)
+    log.info("Подпись сообщений: %s", notifier.source)
 
     if args.test_telegram:
         ok = notifier.send(

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import socket
 import urllib.error
 import urllib.request
 
@@ -41,6 +43,27 @@ ERROR_HINTS = (
 )
 
 
+def detect_source() -> str:
+    """Понять, откуда работает монитор, чтобы подписывать сообщения.
+
+    Один и тот же бот может обслуживать несколько копий — например, домашний
+    компьютер и сервер. Без подписи непонятно, кто прислал сообщение и какую
+    копию чинить, если что-то пошло не так.
+    """
+    if os.environ.get("RENDER") or os.environ.get("RENDER_SERVICE_NAME"):
+        return "☁️ " + (os.environ.get("RENDER_SERVICE_NAME") or "Render")
+
+    for variable in ("DYNO", "KUBERNETES_SERVICE_HOST", "AWS_EXECUTION_ENV"):
+        if os.environ.get(variable):
+            return "☁️ сервер"
+
+    try:
+        host = socket.gethostname()
+    except OSError:
+        host = ""
+    return f"🖥 {host}" if host else "🖥 этот компьютер"
+
+
 def explain(description: str) -> str:
     """Превратить ответ Telegram в понятную подсказку."""
     lowered = description.lower()
@@ -57,12 +80,26 @@ class Notifier:
     должен продолжать проверять сайт, а не падать.
     """
 
-    def __init__(self, token: str, chat_id: str, disabled: bool = False) -> None:
+    def __init__(
+        self,
+        token: str,
+        chat_id: str,
+        disabled: bool = False,
+        source: str = "",
+    ) -> None:
         self.token = token
         self.chat_id = chat_id
         self.disabled = disabled
+        # Подпись источника: к одному боту может быть подключено несколько копий.
+        self.source = source or detect_source()
         # Последняя подсказка по ошибке — её показывает самопроверка при старте.
         self.last_error = ""
+
+    def sign(self, text: str) -> str:
+        """Добавить подпись источника отдельной строкой в конце."""
+        if not self.source:
+            return text
+        return f"{text}\n\n<i>{self.source}</i>"
 
     def send(self, text: str, silent: bool = False) -> bool:
         """Отправить сообщение. Возвращает True при успехе."""
@@ -72,7 +109,7 @@ class Notifier:
 
         payload = {
             "chat_id": self.chat_id,
-            "text": text,
+            "text": self.sign(text),
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
             # Уведомления о датах приходят со звуком — это главный смысл сервиса.

@@ -74,6 +74,9 @@ class Config:
     # --- Telegram ---
     telegram_token: str = ""
     telegram_chat_id: str = ""
+    # Подпись под сообщениями. Пусто — определится само (имя компьютера или
+    # название сервиса на хостинге).
+    instance_name: str = ""
 
     # --- как ходим на сайт ---
     # direct  — обычный HTTP-клиент (Вариант А из ТЗ)
@@ -146,6 +149,7 @@ class Config:
             url=_env_str("TARGET_URL", TARGET_URL),
             telegram_token=_env_str("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=_env_str("TELEGRAM_CHAT_ID"),
+            instance_name=_env_str("INSTANCE_NAME"),
             fetch_mode=_env_str("FETCH_MODE", "auto").lower(),
             scrape_proxy=_env_str("SCRAPE_PROXY"),
             proxy_list=os.environ.get("PROXY_LIST", ""),
