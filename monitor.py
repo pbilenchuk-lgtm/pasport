@@ -255,13 +255,24 @@ class Monitor:
     def save(self) -> None:
         state_module.save(self.cfg.state_path, self.state)
 
+    def interval_range(self) -> tuple[int, int]:
+        """Границы паузы между проверками для текущего способа загрузки.
+
+        У браузера свои значения: проверка через него тяжелее, и ходить так же
+        часто, как простым запросом, незачем.
+        """
+        if isinstance(self.fetcher, BrowserFetcher):
+            return self.cfg.browser_interval_seconds, self.cfg.browser_jitter_seconds
+        return self.cfg.interval_seconds, self.cfg.jitter_seconds
+
+    def interval_bounds(self) -> tuple[int, int]:
+        """Минимальная и максимальная пауза — для логов и сводок."""
+        base, jitter = self.interval_range()
+        return base, base + jitter
+
     def sleep_interval(self) -> None:
         """Пауза между проверками с джиттером, чтобы не выглядеть роботом."""
-        if isinstance(self.fetcher, BrowserFetcher):
-            base, jitter = self.cfg.browser_interval_seconds, self.cfg.browser_jitter_seconds
-        else:
-            base, jitter = self.cfg.interval_seconds, self.cfg.jitter_seconds
-
+        base, jitter = self.interval_range()
         delay = base + random.uniform(0, jitter)
         log.debug("Спим %.1f сек", delay)
         self._interruptible_sleep(delay)
@@ -337,7 +348,11 @@ class Monitor:
             dates = ", ".join(status.dates) if status.dates else "даты не распознаны"
             return f"🚀 <b>Монитор запущен.</b> Прямо сейчас места ЕСТЬ: {html_escape(dates)}"
         if status.state == queue_parser.CLOSED:
-            return "🚀 <b>Монитор запущен.</b> Сейчас мест нет — слежу и сообщу, когда появятся."
+            low, high = self.interval_bounds()
+            return (
+                "🚀 <b>Монитор запущен.</b> Сейчас мест нет — слежу и сообщу, "
+                f"когда появятся.\nПроверяю раз в {low}–{high} сек."
+            )
         return (
             "🚀 <b>Монитор запущен</b>, но состояние очереди распознать не удалось. "
             "Слежу дальше."
@@ -536,12 +551,11 @@ class Monitor:
     def run(self) -> None:
         backend = "браузер" if isinstance(self.fetcher, BrowserFetcher) else "прямой запрос"
         log.info(
-            "Старт. URL=%s, режим=%s (%s), интервал=%d±%d сек",
+            "Старт. URL=%s, режим=%s (%s), проверка раз в %d-%d сек",
             self.cfg.url,
             self.cfg.fetch_mode,
             backend,
-            self.cfg.interval_seconds,
-            self.cfg.jitter_seconds,
+            *self.interval_bounds(),
         )
 
         sysinfo.log_memory("старт")

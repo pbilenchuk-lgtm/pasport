@@ -163,6 +163,34 @@ def test_heartbeat_fires_once_per_day():
     assert mon.state.checks == 0  # счётчики обнулились после отправки
 
 
+def test_interval_matches_the_active_backend():
+    """Логи показывали интервал прямых запросов даже в браузерном режиме."""
+
+    class FakeBrowser(monitor_module.BrowserFetcher):
+        def __init__(self) -> None:  # без запуска настоящего браузера
+            pass
+
+    mon, _ = _monitor([])
+    assert mon.interval_bounds() == (
+        mon.cfg.interval_seconds,
+        mon.cfg.interval_seconds + mon.cfg.jitter_seconds,
+    )
+
+    mon.fetcher = FakeBrowser()
+    assert mon.interval_bounds() == (
+        mon.cfg.browser_interval_seconds,
+        mon.cfg.browser_interval_seconds + mon.cfg.browser_jitter_seconds,
+    ), "в браузерном режиме интервал берётся из BROWSER_*"
+
+
+def test_startup_message_tells_the_interval():
+    mon, _ = _monitor([])
+    closed = queue_parser.parse(_fixture("closed.html"))
+    message = mon.startup_message(closed)
+    low, high = mon.interval_bounds()
+    assert f"{low}–{high} сек" in message
+
+
 def test_coverage_shows_how_much_of_the_day_was_watched():
     """На засыпающем ноутбуке важно видеть простой, а не только число проверок."""
     mon, _ = _monitor([])
