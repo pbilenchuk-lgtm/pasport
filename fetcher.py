@@ -200,8 +200,18 @@ class BrowserFetcher:
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-blink-features=AutomationControlled",
+            "--window-size=1440,900",
+            # Признаки автоматизации, по которым Cloudflare отличает робота.
+            "--disable-features=IsolateOrigins,site-per-process",
         ]
-        launch_kwargs: dict = {"headless": True, "args": launch_args}
+        launch_kwargs: dict = {
+            "headless": self.cfg.browser_headless,
+            "args": launch_args,
+        }
+        log.info(
+            "Запускаю Chromium (%s)",
+            "headless" if self.cfg.browser_headless else "headful под Xvfb",
+        )
         self._launched_proxy = self.proxy_provider()
         if self._launched_proxy:
             from proxies import split_auth
@@ -230,16 +240,36 @@ class BrowserFetcher:
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
         )
 
-        try:
-            from playwright_stealth import stealth_sync
-
-            stealth_sync(self._context)
-            log.info("playwright-stealth подключён")
-        except ImportError:
-            log.info("playwright-stealth не установлен, работаем без него")
+        self._apply_stealth(self._context)
 
         self._page = self._context.new_page()
         return self._page
+
+    @staticmethod
+    def _apply_stealth(context) -> None:
+        """Спрятать признаки автоматизации.
+
+        API у playwright-stealth менялся: в 1.x это функция stealth_sync,
+        в 2.x — метод Stealth().apply_stealth_sync. Поддерживаем оба, чтобы
+        обновление зависимости не отключало маскировку молча.
+        """
+        try:
+            import playwright_stealth
+        except ImportError:
+            log.info("playwright-stealth не установлен, работаем без него")
+            return
+
+        try:
+            if hasattr(playwright_stealth, "stealth_sync"):
+                playwright_stealth.stealth_sync(context)
+            elif hasattr(playwright_stealth, "Stealth"):
+                playwright_stealth.Stealth().apply_stealth_sync(context)
+            else:
+                log.warning("playwright-stealth есть, но знакомого API в нём нет")
+                return
+            log.info("playwright-stealth подключён")
+        except Exception as exc:
+            log.warning("playwright-stealth не применился: %s", str(exc)[:200])
 
     def fetch(self) -> str:
         page = self._ensure_page()
@@ -275,23 +305,59 @@ class BrowserFetcher:
     def _wait_for_challenge(self, page) -> str:
         """Дождаться, пока Cloudflare пропустит. Возвращает итоговый HTML."""
         deadline = time.monotonic() + self.cfg.challenge_wait_seconds
+        started = time.monotonic()
         log.info("Cloudflare показал челлендж, жду прохождения...")
 
+        clicked = False
         while time.monotonic() < deadline:
             page.wait_for_timeout(1500)
             try:
                 html = page.content()
             except Exception:
                 continue  # страница в этот момент могла перезагружаться
+
             if not looks_like_challenge(html):
-                waited = self.cfg.challenge_wait_seconds - (deadline - time.monotonic())
-                log.info("Челлендж пройден за %.0f сек", waited)
+                log.info("Челлендж пройден за %.0f сек", time.monotonic() - started)
                 return html
 
-        log.warning(
-            "Челлендж не пройден за %d сек", self.cfg.challenge_wait_seconds
-        )
+            # Часть челленджей проходит сама, но «managed challenge» ждёт клика
+            # по чекбоксу Turnstile внутри iframe. Пробуем один раз.
+            if not clicked and time.monotonic() - started > 6:
+                clicked = self._try_click_turnstile(page)
+
+        log.warning("Челлендж не пройден за %d сек", self.cfg.challenge_wait_seconds)
+        self._log_challenge_details(page)
         return page.content()
+
+    def _try_click_turnstile(self, page) -> bool:
+        """Кликнуть по чекбоксу Turnstile, если челлендж ждёт взаимодействия."""
+        try:
+            frame = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
+            checkbox = frame.locator('input[type="checkbox"]')
+            if checkbox.count() == 0:
+                return True  # чекбокса нет — челлендж должен пройти сам
+            checkbox.click(timeout=5000)
+            log.info("Кликнул по чекбоксу Turnstile")
+        except Exception as exc:
+            log.debug("Кликнуть по Turnstile не вышло: %s", str(exc)[:150])
+        return True
+
+    def _log_challenge_details(self, page) -> None:
+        """Записать, как выглядит непройденный челлендж — иначе его не починить."""
+        try:
+            log.warning("  заголовок страницы: %r", page.title()[:120])
+        except Exception:
+            pass
+        try:
+            text = page.inner_text("body", timeout=5000)
+            log.warning("  текст: %r", " ".join(text.split())[:300])
+        except Exception:
+            pass
+        try:
+            frames = page.locator('iframe[src*="challenges.cloudflare.com"]').count()
+            log.warning("  iframe'ов Turnstile на странице: %d", frames)
+        except Exception:
+            pass
 
     def close(self) -> None:
         for obj, method in (

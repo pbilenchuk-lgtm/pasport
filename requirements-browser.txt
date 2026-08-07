@@ -3,4 +3,7 @@
 -r requirements.txt
 
 playwright==1.47.0
-playwright-stealth==1.0.6
+
+# Маскирует признаки автоматизации. Версия 2.x свежее и прячет больше, чем 1.x;
+# fetcher.py умеет оба API, так что откат на 1.0.6 тоже рабочий.
+playwright-stealth==2.0.3

@@ -66,7 +66,10 @@ class Config:
 
     request_timeout: int = 40
     # Сколько ждать, пока браузер пройдёт челлендж Cloudflare.
-    challenge_wait_seconds: int = 45
+    challenge_wait_seconds: int = 60
+    # Headless-браузер Cloudflare часто не пропускает. В Docker-образе мы
+    # запускаем настоящий (headful) Chromium под виртуальным дисплеем Xvfb.
+    browser_headless: bool = True
 
     # --- обработка ошибок ---
     error_threshold: int = 5
@@ -108,7 +111,8 @@ class Config:
             browser_interval_seconds=_env_int("BROWSER_INTERVAL_SECONDS", 60),
             browser_jitter_seconds=_env_int("BROWSER_JITTER_SECONDS", 30),
             request_timeout=_env_int("REQUEST_TIMEOUT", 40),
-            challenge_wait_seconds=_env_int("CHALLENGE_WAIT_SECONDS", 45),
+            challenge_wait_seconds=_env_int("CHALLENGE_WAIT_SECONDS", 60),
+            browser_headless=_env_bool("BROWSER_HEADLESS", True),
             error_threshold=_env_int("ERROR_THRESHOLD", 5),
             error_pause_minutes=_env_int("ERROR_PAUSE_MINUTES", 15),
             heartbeat_hour=_env_int("HEARTBEAT_HOUR", 10),

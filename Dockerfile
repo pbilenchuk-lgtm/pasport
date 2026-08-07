@@ -7,6 +7,10 @@ ENV PYTHONUNBUFFERED=1 \
     FETCH_MODE=browser \
     STATE_PATH=/data/state.json
 
+# Cloudflare часто не пропускает headless-браузер, поэтому запускаем настоящий
+# Chromium под виртуальным дисплеем Xvfb (см. CMD в конце файла).
+ENV BROWSER_HEADLESS=false
+
 WORKDIR /app
 
 COPY requirements.txt requirements-browser.txt ./
@@ -18,4 +22,8 @@ COPY . .
 # чтобы состояние переживало передеплой.
 RUN mkdir -p /data
 
-CMD ["python", "monitor.py"]
+# Запуск идёт через entrypoint.sh: он поднимает виртуальный дисплей для
+# headful-браузера. Xvfb уже входит в официальный образ Playwright.
+RUN chmod +x entrypoint.sh
+
+CMD ["./entrypoint.sh"]
