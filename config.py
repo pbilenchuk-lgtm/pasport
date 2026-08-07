@@ -90,6 +90,8 @@ class Config:
     # Проверять ли весь список прокси при старте, оставляя только рабочие.
     proxy_precheck: bool = True
     proxy_check_timeout: int = 20
+    # Сколько часов доверять прошлой проверке прокси, не повторяя её.
+    proxy_cache_hours: int = 6
 
     # --- интервалы ---
     # Для direct: 45 ± 0..15 сек. Для browser: 60 + 0..30 = 60..90 сек.
@@ -104,6 +106,10 @@ class Config:
     # Headless-браузер Cloudflare часто не пропускает. В Docker-образе мы
     # запускаем настоящий (headful) Chromium под виртуальным дисплеем Xvfb.
     browser_headless: bool = True
+    # Размер окна. Меньше окно — меньше памяти под кадровый буфер, а на дешёвом
+    # тарифе контейнер убивали именно за перерасход.
+    browser_width: int = 1280
+    browser_height: int = 800
 
     # --- обработка ошибок ---
     error_threshold: int = 5
@@ -144,6 +150,7 @@ class Config:
             proxy_rotate_after=_env_int("PROXY_ROTATE_AFTER", 3),
             proxy_precheck=_env_bool("PROXY_PRECHECK", True),
             proxy_check_timeout=_env_int("PROXY_CHECK_TIMEOUT", 20),
+            proxy_cache_hours=_env_int("PROXY_CACHE_HOURS", 6),
             interval_seconds=_env_int("INTERVAL_SECONDS", 45),
             jitter_seconds=_env_int("JITTER_SECONDS", 15),
             browser_interval_seconds=_env_int("BROWSER_INTERVAL_SECONDS", 60),
@@ -151,6 +158,8 @@ class Config:
             request_timeout=_env_int("REQUEST_TIMEOUT", 40),
             challenge_wait_seconds=_env_int("CHALLENGE_WAIT_SECONDS", 60),
             browser_headless=_env_bool("BROWSER_HEADLESS", True),
+            browser_width=_env_int("BROWSER_WIDTH", 1280),
+            browser_height=_env_int("BROWSER_HEIGHT", 800),
             error_threshold=_env_int("ERROR_THRESHOLD", 5),
             error_pause_minutes=_env_int("ERROR_PAUSE_MINUTES", 15),
             heartbeat_hour=_env_int("HEARTBEAT_HOUR", 10),

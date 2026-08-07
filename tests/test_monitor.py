@@ -319,6 +319,107 @@ def test_clean_proxies_come_before_challenged_ones():
     assert usable_proxies(results, browser_mode=False) == ["http://clean:2"]
 
 
+def test_proxy_check_result_is_reused_after_restart():
+    """Перезапуск не должен заново гонять весь список: это полторы минуты."""
+    verdicts = {
+        "http://a:1": monitor_module.VERDICT_OK,
+        "http://b:2": "IP ЗАБЛОКИРОВАН",
+        "http://c:3": monitor_module.VERDICT_OK,
+    }
+
+    mon, _ = _monitor([])
+    mon.pool = monitor_module.ProxyPool(list(verdicts))
+    mon.cfg.proxy_precheck = True
+    mon.cfg.fetch_mode = "direct"
+
+    restore = _patch_check_proxies(verdicts)
+    try:
+        mon.precheck_proxies()
+    finally:
+        restore()
+    assert mon.pool.proxies == ["http://a:1", "http://c:3"]
+
+    # Перезапуск: то же состояние, но проверка не должна выполняться вовсе.
+    restarted, _ = _monitor([])
+    restarted.cfg.state_path = mon.cfg.state_path
+    restarted.state = monitor_module.state_module.load(mon.cfg.state_path)
+    restarted.pool = monitor_module.ProxyPool(list(verdicts))
+    restarted.cfg.proxy_precheck = True
+
+    def explode(*args, **kwargs):
+        raise AssertionError("проверка не должна была запускаться — есть свежий кэш")
+
+    original = monitor_module.check_proxies
+    monitor_module.check_proxies = explode
+    try:
+        restarted.precheck_proxies()
+    finally:
+        monitor_module.check_proxies = original
+
+    assert restarted.pool.proxies == ["http://a:1", "http://c:3"]
+
+
+def test_changed_proxy_list_invalidates_cache():
+    """Подменили список — старый результат больше не годится."""
+    verdicts = {"http://a:1": monitor_module.VERDICT_OK, "http://b:2": "IP ЗАБЛОКИРОВАН"}
+
+    mon, _ = _monitor([])
+    mon.pool = monitor_module.ProxyPool(list(verdicts))
+    mon.cfg.proxy_precheck = True
+    mon.cfg.fetch_mode = "direct"
+    restore = _patch_check_proxies(verdicts)
+    try:
+        mon.precheck_proxies()
+    finally:
+        restore()
+
+    other, _ = _monitor([])
+    other.cfg.state_path = mon.cfg.state_path
+    other.state = monitor_module.state_module.load(mon.cfg.state_path)
+    other.pool = monitor_module.ProxyPool(["http://x:9", "http://y:8"])
+    assert other.use_cached_proxies() is False
+
+
+def test_stale_proxy_cache_is_rechecked():
+    verdicts = {"http://a:1": monitor_module.VERDICT_OK}
+
+    mon, _ = _monitor([])
+    mon.pool = monitor_module.ProxyPool(list(verdicts))
+    mon.cfg.proxy_precheck = True
+    mon.cfg.fetch_mode = "direct"
+    restore = _patch_check_proxies(verdicts)
+    try:
+        mon.precheck_proxies()
+    finally:
+        restore()
+
+    # Отматываем время проверки на сутки назад.
+    mon.state.proxy_checked_at -= 24 * 3600
+    assert mon.use_cached_proxies() is False
+
+
+def test_proxy_cache_stores_indices_not_credentials():
+    """В файле состояния не должно быть логинов и паролей от прокси."""
+    proxies = ["http://user:secret@1.2.3.4:8000"]
+    verdicts = {proxies[0]: monitor_module.VERDICT_OK}
+
+    mon, _ = _monitor([])
+    mon.pool = monitor_module.ProxyPool(proxies)
+    mon.cfg.proxy_precheck = True
+    mon.cfg.fetch_mode = "direct"
+    restore = _patch_check_proxies(verdicts)
+    try:
+        mon.precheck_proxies()
+    finally:
+        restore()
+
+    with open(mon.cfg.state_path, encoding="utf-8") as fh:
+        saved = fh.read()
+    assert "secret" not in saved
+    assert "1.2.3.4" not in saved
+    assert mon.state.proxy_usable_indices == [0]
+
+
 def test_precheck_warns_when_no_proxy_works():
     mon, notifier = _monitor([])
     mon.pool = monitor_module.ProxyPool(["http://a:1"])

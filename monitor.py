@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import logging
 import random
@@ -27,6 +28,7 @@ from zoneinfo import ZoneInfo
 
 import parser as queue_parser
 import state as state_module
+import sysinfo
 from config import Config
 from fetcher import (
     BlockedError,
@@ -145,6 +147,9 @@ class Monitor:
         if not self.pool.enabled or not self.cfg.proxy_precheck:
             return
 
+        if self.use_cached_proxies():
+            return
+
         log.info("Проверяю %d прокси (параллельно, это займёт минуту)...", len(self.pool))
         results = check_proxies(self.cfg, self.pool.proxies)
 
@@ -186,7 +191,57 @@ class Monitor:
             )
 
         log.info("Годных прокси: %d. Использую %s", len(usable), proxy_mask(usable[0]))
+        self.remember_proxies(usable)
         self.pool = ProxyPool(usable)
+
+    def proxy_signature(self) -> str:
+        """Отпечаток списка прокси — чтобы заметить, что список подменили."""
+        joined = "\n".join(self.pool.proxies)
+        return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+    def use_cached_proxies(self) -> bool:
+        """Взять годные прокси из прошлой проверки, если она ещё свежая.
+
+        Перезапуски на хостинге случаются часто, а полная проверка списка стоит
+        полторы минуты и заметного расхода памяти. Кэш убирает эту работу.
+        """
+        if not self.state.proxy_usable_indices:
+            return False
+        if self.state.proxy_signature != self.proxy_signature():
+            log.info("Список прокси изменился — проверяю заново")
+            return False
+
+        age_hours = (time.time() - self.state.proxy_checked_at) / 3600
+        if age_hours > self.cfg.proxy_cache_hours:
+            log.info("Прошлая проверка прокси устарела (%.1f ч) — проверяю заново", age_hours)
+            return False
+
+        usable = [
+            self.pool.proxies[i]
+            for i in self.state.proxy_usable_indices
+            if 0 <= i < len(self.pool.proxies)
+        ]
+        if not usable:
+            return False
+
+        log.info(
+            "Беру %d годных прокси из проверки %.1f ч назад. Использую %s",
+            len(usable),
+            age_hours,
+            proxy_mask(usable[0]),
+        )
+        self.pool = ProxyPool(usable)
+        return True
+
+    def remember_proxies(self, usable: list[str]) -> None:
+        """Запомнить результат проверки, чтобы не повторять его при перезапуске."""
+        index_by_proxy = {proxy: i for i, proxy in enumerate(self.pool.proxies)}
+        self.state.proxy_signature = self.proxy_signature()
+        self.state.proxy_usable_indices = [
+            index_by_proxy[p] for p in usable if p in index_by_proxy
+        ]
+        self.state.proxy_checked_at = time.time()
+        self.save()
 
     def rotate_proxy(self) -> bool:
         """Взять следующий прокси из пула. False — если пул не задан."""
@@ -428,13 +483,16 @@ class Monitor:
             self.cfg.jitter_seconds,
         )
 
+        sysinfo.log_memory("старт")
         self.precheck_proxies()
+        sysinfo.log_memory("после проверки прокси")
 
         # Первая проверка идёт до приветственного сообщения, чтобы отправить
         # одно письмо вместо двух и сразу сказать, как дела на сайте. Это важно
         # для машины, которая засыпает: после каждого пробуждения видно, что
         # слежка возобновилась и что происходит с очередью прямо сейчас.
         first = self.check_once()
+        sysinfo.log_memory("после первой проверки")
         if first is not None:
             self.handle_status(first)
 

@@ -201,7 +201,7 @@ class BrowserFetcher:
         if not headless:
             import display
 
-            if not display.ensure():
+            if not display.ensure(self.cfg.browser_width, self.cfg.browser_height):
                 log.warning(
                     "Виртуального дисплея нет — запускаю браузер в headless. "
                     "Cloudflare такой браузер пропускает хуже."
@@ -216,9 +216,18 @@ class BrowserFetcher:
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-blink-features=AutomationControlled",
-            "--window-size=1440,900",
+            f"--window-size={self.cfg.browser_width},{self.cfg.browser_height}",
             # Признаки автоматизации, по которым Cloudflare отличает робота.
             "--disable-features=IsolateOrigins,site-per-process",
+            # Экономия памяти: на дешёвом тарифе контейнер с 512 МБ убивал
+            # процесс прямо посреди прохождения челленджа. Ничего из этого не
+            # мешает Cloudflare считать браузер настоящим.
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--disable-extensions",
+            "--disable-background-networking",
+            "--renderer-process-limit=1",
+            "--js-flags=--max-old-space-size=192",
         ]
         # env передаём явно: полагаться на то, что драйвер унаследовал DISPLAY,
         # ненадёжно — именно на этом headful-режим и не запускался.
@@ -259,7 +268,7 @@ class BrowserFetcher:
             user_agent=self.cfg.user_agent,
             locale="uk-UA",
             timezone_id="Europe/Warsaw",
-            viewport={"width": 1440, "height": 900},
+            viewport={"width": self.cfg.browser_width, "height": self.cfg.browser_height},
             extra_http_headers={"accept-language": "uk-UA,uk;q=0.9,en;q=0.8"},
         )
 
@@ -323,6 +332,9 @@ class BrowserFetcher:
         # надо только дождаться. Полученный cf_clearance живёт в контексте,
         # поэтому следующие проверки идут уже без задержки.
         if looks_like_challenge(html):
+            import sysinfo
+
+            sysinfo.log_memory("браузер с челленджем")
             html = self._wait_for_challenge(page)
             # Челлендж пройден — исходный 403 больше не описывает результат.
             status = 200 if not looks_like_challenge(html) else status

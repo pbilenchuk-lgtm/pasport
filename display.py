@@ -55,7 +55,7 @@ def stop() -> None:
     _display = None
 
 
-def ensure(width: int = 1440, height: int = 900) -> bool:
+def ensure(width: int = 1280, height: int = 800) -> bool:
     """Гарантировать наличие рабочего X-дисплея.
 
     Возвращает True, если headful-браузер запускать можно.
@@ -95,7 +95,9 @@ def ensure(width: int = 1440, height: int = 900) -> bool:
                     f":{number}",
                     "-screen",
                     "0",
-                    f"{width}x{height}x24",
+                    # 16 бит вместо 24: кадровый буфер вдвое меньше, а для
+                    # прохождения челленджа глубина цвета роли не играет.
+                    f"{width}x{height}x16",
                     "-nolisten",
                     "tcp",
                 ],

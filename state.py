@@ -35,6 +35,13 @@ class State:
     unknown_streak: int = 0
     unknown_notified: bool = False
 
+    # Кэш проверки прокси. Проверять 160 адресов — полторы минуты и заметный
+    # расход памяти, а при частых перезапусках это повторяется каждый раз.
+    # Храним не адреса, а их номера в списке: учётным данным в файле не место.
+    proxy_signature: str = ""
+    proxy_usable_indices: list[int] = field(default_factory=list)
+    proxy_checked_at: float = 0.0
+
     def reset_counters(self, day: str) -> None:
         self.counters_day = day
         self.checks = 0
