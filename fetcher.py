@@ -17,6 +17,7 @@ IP короткий `403 Blocked for security reasons` БЕЗ заголовка
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 
 from config import Config
@@ -108,12 +109,8 @@ class DirectFetcher:
         self._setup()
 
     def _setup(self) -> None:
-        try:
-            from curl_cffi import requests as curl_requests  # noqa: F401
-
-            self._impl = "curl_cffi"
-        except ImportError:
-            self._impl = "httpx"
+        # curl_cffi подделывает TLS-отпечаток Chrome, поэтому предпочитаем его.
+        self._impl = "curl_cffi" if importlib.util.find_spec("curl_cffi") else "httpx"
         log.info("direct-бэкенд: %s", self._impl)
 
     def fetch(self) -> str:

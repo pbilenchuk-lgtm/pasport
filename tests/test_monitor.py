@@ -197,6 +197,87 @@ def test_startup_check_sends_a_message():
     assert "запущен" in notifier.messages[0]
 
 
+def _patch_check_proxies(result):
+    """Подменить check_proxies, вернув функцию восстановления.
+
+    Атрибут именно подменяется, а не создаётся: если импорт в monitor.py
+    пропадёт, тест упадёт на AttributeError, а не замаскирует ошибку.
+    """
+    original = monitor_module.check_proxies
+    monitor_module.check_proxies = lambda cfg, proxies, **kw: result(proxies)
+
+    def restore() -> None:
+        monitor_module.check_proxies = original
+
+    return restore
+
+
+def test_precheck_keeps_only_working_proxies():
+    mon, _ = _monitor([])
+    mon.pool = monitor_module.ProxyPool(["http://a:1", "http://b:2"])
+    mon.cfg.proxy_precheck = True
+
+    restore = _patch_check_proxies(lambda proxies: proxies[:1])
+    try:
+        mon.precheck_proxies()
+    finally:
+        restore()
+
+    assert len(mon.pool) == 1
+    assert mon.pool.current() == "http://a:1"
+
+
+def test_precheck_warns_when_no_proxy_works():
+    mon, notifier = _monitor([])
+    mon.pool = monitor_module.ProxyPool(["http://a:1"])
+    mon.cfg.proxy_precheck = True
+
+    restore = _patch_check_proxies(lambda proxies: [])
+    try:
+        mon.precheck_proxies()
+    finally:
+        restore()
+
+    assert any("Ни один" in m for m in notifier.messages)
+
+
+def test_precheck_skipped_without_proxies():
+    """Без списка прокси стартовая проверка не должна ничего делать."""
+    mon, notifier = _monitor([])
+    mon.precheck_proxies()
+    assert notifier.messages == []
+
+
+def test_no_undefined_names_anywhere():
+    """Статический анализ всего проекта.
+
+    Продакшен уже падал с NameError: функция вызывалась, но импорт стоял
+    только внутри другой ветки. Обычные тесты такое пропускают, если ветка
+    не выполняется, — поэтому проверяем исходники целиком.
+    """
+    import subprocess
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    files = [
+        os.path.join(root, name)
+        for name in sorted(os.listdir(root))
+        if name.endswith(".py")
+    ]
+    files += [os.path.join(FIXTURES, "..", f) for f in ("test_monitor.py",)]
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pyflakes", *files],
+        capture_output=True,
+        text=True,
+    )
+
+    if "No module named" in result.stderr:
+        print("    (pyflakes не установлен, проверка пропущена)")
+        return
+
+    assert not result.stdout.strip(), f"pyflakes нашёл проблемы:\n{result.stdout}"
+
+
 def test_interval_floor_is_enforced():
     """Ниже 30 секунд опускаться нельзя, даже если попросили."""
     os.environ["INTERVAL_SECONDS"] = "5"

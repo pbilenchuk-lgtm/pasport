@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import logging
 import random
 import signal
@@ -27,7 +28,14 @@ from zoneinfo import ZoneInfo
 import parser as queue_parser
 import state as state_module
 from config import Config
-from fetcher import BlockedError, BrowserFetcher, CaptchaError, FetchError, build_fetcher
+from fetcher import (
+    BlockedError,
+    BrowserFetcher,
+    CaptchaError,
+    FetchError,
+    build_fetcher,
+    check_proxies,
+)
 from notifier import Notifier
 from proxies import ProxyPool, load_proxies
 from proxies import mask as proxy_mask
@@ -280,9 +288,7 @@ class Monitor:
         if not all(isinstance(e, BlockedError) for e in self.last_errors):
             return
 
-        try:
-            import playwright  # noqa: F401
-        except ImportError:
+        if not importlib.util.find_spec("playwright"):
             log.warning(
                 "Прямые запросы блокируются, но Playwright не установлен — "
                 "переключиться на браузер не могу"
@@ -456,8 +462,6 @@ def cmd_probe(cfg: Config) -> int:
 
 def cmd_probe_list(cfg: Config) -> int:
     """Проверить весь список прокси и напечатать рабочие."""
-    from fetcher import check_proxies
-
     proxies = load_proxies(cfg.proxy_list, cfg.proxy_list_path)
     if not proxies:
         print(
