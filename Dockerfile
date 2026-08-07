@@ -22,8 +22,7 @@ COPY . .
 # чтобы состояние переживало передеплой.
 RUN mkdir -p /data
 
-# Запуск идёт через entrypoint.sh: он поднимает виртуальный дисплей для
-# headful-браузера. Xvfb уже входит в официальный образ Playwright.
-RUN chmod +x entrypoint.sh
-
-CMD ["./entrypoint.sh"]
+# Виртуальный дисплей для headful-браузера поднимает сам монитор (display.py)
+# прямо перед запуском Chromium, поэтому обёртка вроде xvfb-run не нужна:
+# python остаётся главным процессом и штатно обрабатывает SIGTERM от Render.
+CMD ["python", "monitor.py"]

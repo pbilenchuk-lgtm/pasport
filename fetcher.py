@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import os
 import time
 
 from config import Config
@@ -204,13 +205,23 @@ class BrowserFetcher:
             # Признаки автоматизации, по которым Cloudflare отличает робота.
             "--disable-features=IsolateOrigins,site-per-process",
         ]
-        launch_kwargs: dict = {
-            "headless": self.cfg.browser_headless,
-            "args": launch_args,
-        }
+        headless = self.cfg.browser_headless
+        if not headless:
+            # Дисплей поднимаем прямо сейчас: между стартом контейнера и этим
+            # моментом проходит около минуты, за неё Xvfb мог не дожить.
+            import display
+
+            if not display.ensure():
+                log.warning(
+                    "Виртуального дисплея нет — запускаю браузер в headless. "
+                    "Cloudflare такой браузер пропускает хуже."
+                )
+                headless = True
+
+        launch_kwargs: dict = {"headless": headless, "args": launch_args}
         log.info(
             "Запускаю Chromium (%s)",
-            "headless" if self.cfg.browser_headless else "headful под Xvfb",
+            "headless" if headless else "headful, DISPLAY=" + os.environ.get("DISPLAY", "?"),
         )
         self._launched_proxy = self.proxy_provider()
         if self._launched_proxy:
@@ -226,7 +237,16 @@ class BrowserFetcher:
                 proxy_config["password"] = password
             launch_kwargs["proxy"] = proxy_config
 
-        self._browser = self._pw.chromium.launch(**launch_kwargs)
+        try:
+            self._browser = self._pw.chromium.launch(**launch_kwargs)
+        except Exception as exc:
+            # Дисплей мог отвалиться между проверкой и запуском. Ронять сервис
+            # из-за этого нельзя — переходим на headless и работаем дальше.
+            if headless or "xserver" not in str(exc).lower().replace(" ", ""):
+                raise
+            log.warning("Headful-браузер не запустился (%s) — пробую headless", str(exc)[:200])
+            launch_kwargs["headless"] = True
+            self._browser = self._pw.chromium.launch(**launch_kwargs)
         self._context = self._browser.new_context(
             user_agent=self.cfg.user_agent,
             locale="uk-UA",
