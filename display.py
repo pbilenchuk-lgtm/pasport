@@ -27,11 +27,47 @@ _process: subprocess.Popen | None = None
 _display: str | None = None
 
 # Номера дисплеев, которые пробуем занять.
-_CANDIDATES = (99, 98, 97, 96)
+_CANDIDATES = tuple(range(99, 89, -1))
 
 
 def _socket_path(number: int) -> str:
     return f"/tmp/.X11-unix/X{number}"
+
+
+def _lock_path(number: int) -> str:
+    return f"/tmp/.X{number}-lock"
+
+
+def _is_stale(number: int) -> bool:
+    """Остался ли номер занятым от убитого сервера.
+
+    Xvfb пишет в файл замка свой PID и удаляет замок при штатном завершении.
+    Если процесс убили (например, контейнеру не хватило памяти), замок и сокет
+    остаются навсегда. Без этой проверки каждый перезапуск съедал бы по номеру,
+    а исчерпав их, монитор молча уходил бы в headless.
+    """
+    try:
+        with open(_lock_path(number)) as fh:
+            pid = int(fh.read().strip())
+    except (OSError, ValueError):
+        # Замка нет или он нечитаем — занят, видимо, только сокет.
+        return not os.path.exists(_lock_path(number))
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False  # процесс живой, просто чужой
+    return False
+
+
+def _cleanup(number: int) -> None:
+    for path in (_lock_path(number), _socket_path(number)):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def is_alive() -> bool:
@@ -45,12 +81,20 @@ def is_alive() -> bool:
 
 def stop() -> None:
     global _process, _display
+    number = int(_display.lstrip(":")) if _display else None
+
     if _process is not None and _process.poll() is None:
         _process.terminate()
         try:
             _process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             _process.kill()
+            _process.wait(timeout=5)
+
+    # За собой убираем сами: после kill замок и сокет остаются.
+    if number is not None:
+        _cleanup(number)
+
     _process = None
     _display = None
 
@@ -83,10 +127,14 @@ def ensure(width: int = 1280, height: int = 800) -> bool:
     os.makedirs("/tmp/.X11-unix", exist_ok=True)
 
     for number in _CANDIDATES:
-        # Чужой или осиротевший сокет — этот номер занят, пробуем следующий.
-        lock = f"/tmp/.X{number}-lock"
-        if os.path.exists(_socket_path(number)) or os.path.exists(lock):
-            continue
+        occupied = os.path.exists(_socket_path(number)) or os.path.exists(
+            _lock_path(number)
+        )
+        if occupied:
+            if not _is_stale(number):
+                continue  # номер занят живым сервером
+            log.info("Освобождаю номер :%d — остался от убитого Xvfb", number)
+            _cleanup(number)
 
         try:
             process = subprocess.Popen(

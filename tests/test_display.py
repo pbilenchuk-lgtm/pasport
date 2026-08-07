@@ -90,7 +90,8 @@ def test_dead_display_is_restarted():
     display.stop()
     os.environ.pop("DISPLAY", None)
     try:
-        display.ensure()
+        assert display.ensure() is True
+        assert display._process is not None
         display._process.kill()
         display._process.wait()
         time.sleep(0.3)
@@ -100,6 +101,74 @@ def test_dead_display_is_restarted():
         assert display.is_alive() is True
     finally:
         display.stop()
+
+
+def test_lock_from_killed_server_is_reclaimed():
+    """Убитый Xvfb оставляет замок навсегда.
+
+    Именно так номера и заканчивались: на проде первый запуск брал :99,
+    следующий уже :98. Исчерпав список, монитор молча ушёл бы в headless.
+    """
+    if not HAS_XVFB:
+        print("    (Xvfb не установлен, проверка пропущена)")
+        return
+
+    display.stop()
+    os.environ.pop("DISPLAY", None)
+    try:
+        assert display.ensure() is True
+        first = display._display
+        number = int(first.lstrip(":"))
+
+        # Убиваем сервер жёстко и восстанавливаем оставленный им замок.
+        process = display._process
+        process.kill()
+        process.wait()
+        with open(display._lock_path(number), "w") as fh:
+            fh.write(f"{process.pid}\n")
+        display._process = None
+        display._display = None
+        os.environ.pop("DISPLAY", None)
+
+        assert display._is_stale(number) is True, "замок мёртвого процесса не опознан"
+        assert display.ensure() is True
+        assert display._display == first, (
+            f"номер {first} должен переиспользоваться, а не теряться "
+            f"(взяли {display._display})"
+        )
+    finally:
+        display.stop()
+
+
+def test_live_server_number_is_not_stolen():
+    """Занятый живым процессом номер трогать нельзя."""
+    if not HAS_XVFB:
+        print("    (Xvfb не установлен, проверка пропущена)")
+        return
+
+    display.stop()
+    os.environ.pop("DISPLAY", None)
+    try:
+        assert display.ensure() is True
+        number = int(display._display.lstrip(":"))
+        assert display._is_stale(number) is False
+    finally:
+        display.stop()
+
+
+def test_stop_removes_lock_behind_itself():
+    if not HAS_XVFB:
+        print("    (Xvfb не установлен, проверка пропущена)")
+        return
+
+    display.stop()
+    os.environ.pop("DISPLAY", None)
+    display.ensure()
+    number = int(display._display.lstrip(":"))
+    display.stop()
+
+    assert not os.path.exists(display._lock_path(number))
+    assert not os.path.exists(display._socket_path(number))
 
 
 def test_stop_is_idempotent():
