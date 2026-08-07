@@ -66,17 +66,17 @@ def run(args: list[str], quiet: bool = True) -> int:
 
 def step_venv() -> bool:
     if os.path.exists(VENV_PY):
-        say("[1/5] Виртуальное окружение уже есть.")
+        say("[1/6] Виртуальное окружение уже есть.")
         return True
 
-    say("[1/5] Создаю виртуальное окружение...")
+    say("[1/6] Создаю виртуальное окружение...")
     if run([sys.executable, "-m", "venv", VENV_DIR]) != 0:
         return False
     return os.path.exists(VENV_PY)
 
 
 def step_dependencies() -> bool:
-    say("[2/5] Ставлю зависимости (это займёт минуту)...")
+    say("[2/6] Ставлю зависимости (это займёт минуту)...")
     run([VENV_PY, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
 
     if run([VENV_PY, "-m", "pip", "install", "--quiet", "-r", "requirements.txt"]) != 0:
@@ -123,11 +123,11 @@ def step_settings() -> bool:
     chat_id = existing.get("TELEGRAM_CHAT_ID", "")
 
     if TOKEN_RE.match(token) and CHAT_ID_RE.match(chat_id):
-        say("[3/5] Настройки уже заданы в файле .env.")
+        say("[3/6] Настройки уже заданы в файле .env.")
         return True
 
     say()
-    say("[3/5] Настройка Telegram.")
+    say("[3/6] Настройка Telegram.")
     say()
     say("    Токен берётся у @BotFather и выглядит так: 1234567890:AAxxxxxxxx")
     say("    Свой chat_id можно узнать у бота @userinfobot — это число.")
@@ -169,7 +169,7 @@ def step_pick_browser_mode() -> bool:
     Результат записываем в .env, чтобы монитор не подбирал это каждый раз.
     """
     say()
-    say("[4/5] Подбираю режим браузера (проверка Cloudflare)...")
+    say("[5/6] Подбираю режим браузера (проверка Cloudflare)...")
 
     for headless, label in ((True, "скрытый"), (False, "обычный")):
         say(f"      Пробую {label} браузер...")
@@ -207,7 +207,7 @@ def step_pick_browser_mode() -> bool:
 
 def step_telegram_check() -> bool:
     say()
-    say("[4/5] Проверяю, доходят ли уведомления...")
+    say("[4/6] Проверяю, доходят ли уведомления...")
     if run([VENV_PY, "monitor.py", "--test-telegram"], quiet=False) != 0:
         say()
         say("[!] Уведомление не дошло.")
@@ -220,7 +220,7 @@ def step_telegram_check() -> bool:
 
 def step_autostart(extra_args: list[str]) -> bool:
     say()
-    say("[5/5] Настраиваю автозапуск...")
+    say("[6/6] Настраиваю автозапуск...")
     task_script = os.path.join(ROOT, "windows", "install_task.py")
     return run([VENV_PY, task_script] + extra_args, quiet=False) == 0
 
