@@ -336,6 +336,40 @@ def test_no_undefined_names_anywhere():
     assert not result.stdout.strip(), f"pyflakes нашёл проблемы:\n{result.stdout}"
 
 
+def test_unknown_timezone_falls_back_to_utc():
+    """Отсутствие базы часовых поясов роняло весь сервис в Docker-образе.
+
+    Сердцебиение — вспомогательная функция, из-за неё монитор падать не должен.
+    """
+    tz = monitor_module.resolve_timezone("Europe/Nonexistent")
+    assert tz is not None
+
+    from datetime import datetime, timezone as dt_timezone
+
+    assert datetime.now(dt_timezone.utc).astimezone(tz) is not None
+
+
+def test_known_timezone_still_resolves():
+    tz = monitor_module.resolve_timezone("Europe/Warsaw")
+    assert str(tz) in {"Europe/Warsaw", "UTC"}
+
+
+def test_monitor_starts_with_broken_timezone():
+    """Монитор должен создаваться даже при неверном HEARTBEAT_TIMEZONE."""
+    handle, path = tempfile.mkstemp(suffix=".json")
+    os.close(handle)
+    os.unlink(path)
+
+    cfg = Config(
+        telegram_token="x",
+        telegram_chat_id="1",
+        state_path=path,
+        heartbeat_timezone="Не/Существует",
+    )
+    mon = monitor_module.Monitor(cfg, FakeNotifier())
+    assert mon.now() is not None
+
+
 def test_interval_floor_is_enforced():
     """Ниже 30 секунд опускаться нельзя, даже если попросили."""
     os.environ["INTERVAL_SECONDS"] = "5"

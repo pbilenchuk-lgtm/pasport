@@ -66,6 +66,25 @@ def setup_logging(level: str) -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
+def resolve_timezone(name: str):
+    """Часовой пояс для сердцебиения, с откатом на UTC.
+
+    В минимальных образах (в том числе в официальном образе Playwright) базы
+    часовых поясов может не быть. Ронять из-за этого весь монитор нельзя:
+    сердцебиение — вспомогательная функция, а слежение за датами — основная.
+    """
+    try:
+        return ZoneInfo(name)
+    except Exception as exc:
+        log.warning(
+            "Часовой пояс %s недоступен (%s) — считаю время по UTC. "
+            "Чтобы починить, установи пакет tzdata.",
+            name,
+            exc,
+        )
+        return timezone.utc
+
+
 def html_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -83,7 +102,7 @@ class Monitor:
                 proxy_mask(self.pool.current()),
             )
         self.fetcher = build_fetcher(cfg, self._current_proxy)
-        self.tz = ZoneInfo(cfg.heartbeat_timezone)
+        self.tz = resolve_timezone(cfg.heartbeat_timezone)
         self.consecutive_errors = 0
         self.last_errors: list[Exception] = []
         self.switched_to_browser = False
